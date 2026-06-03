@@ -403,24 +403,3 @@ export default function App() {
   );
 }
 ---
-
-## How to use
-
-- **Voice:** Tap 🎤 and say the instruction — it transcribes and parses automatically
-- **Text:** Type naturally, hit Enter or Parse
-- **Manual:** Click "+ Add manually" and fill fields directly
-- **Update:** Say "change room 4 to 90 min" and it finds and updates that line
-- **Data:** Stays on device — no account, no server, no PHI risk
-
-## Example commands
-- "add room 7 heparin 125ml over 60 minutes"
-- "change room 4 dopamine from 100ml over 60 min to 90 min"
-- "room 12 vancomycin 250ml over 2 hours"
-- "update room 3 to 150ml over 45 min"
-
----
-
-## Cost
-- Hosting: Free (Vercel)
-- AI: ~$0.001 per parse request (Anthropic API)
-- Domain: ~$12/year (optional)
