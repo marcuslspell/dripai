@@ -49,27 +49,24 @@ If adding new line, set action="add".
 Respond ONLY with valid compact JSON, no markdown, no explanation:
 {"action":"add|update","room":"string or null","drug":"string or null","volumeMl":number_or_null,"timeMin":number_or_null,"notes":"string or null","warning":"string or null","summary":"plain English one sentence of what was done"}`;
 
-async function parseWithAI(text) {
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 400,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: text }],
-    }),
+async function parseWithAI(text){
+  console.log("API KEY present:", !!API_KEY);
+  console.log("Sending text:", text);
+  
+  const resp=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{"Content-Type":"application/json","x-api-key":API_KEY,"anthropic-version":"2023-06-01"},
+    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:400,system:SYSTEM_PROMPT,messages:[{role:"user",content:text}]}),
   });
-  if (!resp.ok) throw new Error(`API ${resp.status}`);
-  const data = await resp.json();
-  const raw = data.content.map(c => c.text || "").join("").replace(/```json|```/g, "").trim();
+  
+  const data=await resp.json();
+  console.log("Response status:", resp.status);
+  console.log("Response body:", JSON.stringify(data));
+  
+  if(!resp.ok)throw new Error(`API ${resp.status}`);
+  const raw=data.content.map(c=>c.text||"").join("").replace(/```json|```/g,"").trim();
   return JSON.parse(raw);
 }
-
 // ─── Components ───────────────────────────────────────────────────────────────
 
 function StatusBanner({ status }) {
