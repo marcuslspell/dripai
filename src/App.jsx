@@ -53,9 +53,9 @@ async function parseWithAI(text){
   console.log("API KEY present:", !!API_KEY);
   console.log("Sending text:", text);
   
-  const resp=await fetch("https://api.anthropic.com/v1/messages",{
-    method:"POST",
-    headers:{"Content-Type":"application/json","x-api-key":API_KEY,"anthropic-version":"2023-06-01"},
+  const resp = await fetch("/api/parse", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
     body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:400,system:SYSTEM_PROMPT,messages:[{role:"user",content:text}]}),
   });
   
