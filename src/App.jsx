@@ -64,6 +64,48 @@ async function parseWithAI(text){
   return JSON.parse(raw.replace(/```json|```/g,"").trim());
 }
 
+// ─── Disclaimer Modal ─────────────────────────────────────────────────────────
+function DisclaimerModal({onAccept}){
+  return(
+    <div style={{position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,0.85)",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{background:COLORS.surface,border:`1px solid ${COLORS.border}`,borderRadius:16,maxWidth:420,width:"100%",overflow:"hidden"}}>
+        {/* Header */}
+        <div style={{background:`linear-gradient(135deg,${COLORS.purple},${COLORS.blue})`,padding:"20px 24px"}}>
+          <div style={{fontSize:28,marginBottom:8}}>⚕️</div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:16,fontWeight:700,color:"#fff"}}>Before You Continue</div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:"rgba(255,255,255,0.7)",marginTop:4}}>Please read and acknowledge</div>
+        </div>
+
+        {/* Body */}
+        <div style={{padding:"20px 24px"}}>
+          <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            {[
+              {icon:"🧮", text:"DripAI is a calculation aid only. Always verify results independently before acting."},
+              {icon:"🚫", text:"This is not medical advice and does not replace clinical judgment, physician orders, or your facility's protocols."},
+              {icon:"🔒", text:"Do not enter patient names, MRNs, or any identifying information. Questions are processed by a third-party AI service."},
+              {icon:"⚠️", text:"Use of this tool is at your own risk. This is a beta product under active development."},
+            ].map((item,i)=>(
+              <div key={i} style={{display:"flex",gap:12,alignItems:"flex-start"}}>
+                <span style={{fontSize:18,flexShrink:0,marginTop:1}}>{item.icon}</span>
+                <span style={{fontSize:13,color:COLORS.muted,lineHeight:1.6,fontFamily:"IBM Plex Sans"}}>{item.text}</span>
+              </div>
+            ))}
+          </div>
+
+          <button onClick={onAccept}
+            style={{width:"100%",marginTop:20,background:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,border:"none",borderRadius:10,padding:"14px",color:"#0a0f1a",fontFamily:"IBM Plex Mono",fontSize:13,fontWeight:700,cursor:"pointer",letterSpacing:0.5}}>
+            I Understand — Continue to DripAI
+          </button>
+
+          <div style={{textAlign:"center",marginTop:10,fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.muted}}>
+            This acknowledgment is saved on your device
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Chat Component ───────────────────────────────────────────────────────────
 function ChatOverlay({onClose}){
   const [messages, setMessages] = useState([
@@ -250,6 +292,14 @@ export default function App(){
   const [status,setStatus]=useState(null);
   const [clock,setClock]=useState("");
   const [chatOpen,setChatOpen]=useState(false);
+  const [showDisclaimer,setShowDisclaimer]=useState(()=>{
+    try{return !localStorage.getItem("dripaiv3_disclaimer_accepted");}catch{return true;}
+  });
+
+  function acceptDisclaimer(){
+    try{localStorage.setItem("dripaiv3_disclaimer_accepted","true");}catch{}
+    setShowDisclaimer(false);
+  }
 
   useEffect(()=>{
     const tick=()=>setClock(new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}));
@@ -351,6 +401,9 @@ export default function App(){
           </div>
         )}
       </div>
+
+      {/* Disclaimer */}
+      {showDisclaimer&&<DisclaimerModal onAccept={acceptDisclaimer}/>}
 
       {/* Floating Chat Button */}
       {!chatOpen&&(
