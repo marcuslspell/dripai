@@ -11,7 +11,10 @@ export default async function handler(req, res) {
       "x-api-key": process.env.VITE_ANTHROPIC_KEY,
       "anthropic-version": "2023-06-01",
     },
-    body: JSON.stringify(req.body),
+    body: JSON.stringify({
+      ...req.body,
+      model: "claude-sonnet-4-6",
+    }),
   });
 
   const data = await resp.json();
