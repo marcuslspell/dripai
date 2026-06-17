@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-
+import { lookupDrug } from "./drugDB.js";
 
 const STORAGE_KEY = "dripaiv3_lines";
 const ID_KEY      = "dripaiv3_nextid";
@@ -77,6 +77,46 @@ async function callAPI(messages, system){
 async function parseWithAI(text){
   const raw = await callAPI([{role:"user",content:text}], PARSE_SYSTEM);
   return JSON.parse(raw.replace(/```json|```/g,"").trim());
+}
+
+// ─── iOS Install Prompt ───────────────────────────────────────────────────────
+function InstallPrompt({onDismiss}){
+  return(
+    <div style={{position:"fixed",bottom:0,left:0,right:0,zIndex:999,padding:"0 16px 16px",animation:"slideUp 0.4s ease"}}>
+      <div style={{background:COLORS.surface,border:`1px solid ${COLORS.accent}`,borderRadius:16,padding:"16px",boxShadow:"0 -4px 32px rgba(0,0,0,0.5)"}}>
+        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:12}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={{width:40,height:40,background:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,borderRadius:10,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22}}>💉</div>
+            <div>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:13,fontWeight:700,color:COLORS.text}}>Add ShiftMate to your home screen</div>
+              <div style={{fontFamily:"IBM Plex Sans",fontSize:12,color:COLORS.muted,marginTop:2}}>Use it like an app — no App Store needed</div>
+            </div>
+          </div>
+          <button onClick={onDismiss} style={{background:"none",border:"none",color:COLORS.muted,fontSize:18,cursor:"pointer",padding:"0 0 0 8px",flexShrink:0}}>✕</button>
+        </div>
+
+        {/* Steps */}
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:14}}>
+          {[
+            {icon:"1️⃣", text:<>Tap the <strong style={{color:COLORS.accent}}>Share</strong> button <span style={{fontSize:16}}>⎙</span> at the bottom of Safari</>},
+            {icon:"2️⃣", text:<>Scroll down and tap <strong style={{color:COLORS.accent}}>"Add to Home Screen"</strong></>},
+            {icon:"3️⃣", text:<>Tap <strong style={{color:COLORS.accent}}>"Add"</strong> — done! ShiftMate lives on your home screen</>},
+          ].map((s,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"flex-start",gap:10,background:COLORS.surface2,borderRadius:8,padding:"9px 12px"}}>
+              <span style={{fontSize:16,flexShrink:0}}>{s.icon}</span>
+              <span style={{fontFamily:"IBM Plex Sans",fontSize:13,color:COLORS.text,lineHeight:1.5}}>{s.text}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Arrow pointing down to share button */}
+        <div style={{textAlign:"center",fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.accent,animation:"bounce 1.5s ease-in-out infinite"}}>
+          ↓ Share button is at the bottom of your screen
+        </div>
+      </div>
+      <style>{`@keyframes slideUp{from{opacity:0;transform:translateY(40px)}to{opacity:1;transform:translateY(0)}}`}</style>
+    </div>
+  );
 }
 
 // ─── Disclaimer Modal ─────────────────────────────────────────────────────────
@@ -370,6 +410,19 @@ export default function App(){
   const [status,setStatus]=useState(null);
   const [clock,setClock]=useState("");
   const [chatOpen,setChatOpen]=useState(false);
+  const [showInstall,setShowInstall]=useState(()=>{
+    try{
+      const isIOS=/iphone|ipad|ipod/i.test(navigator.userAgent);
+      const isSafari=/safari/i.test(navigator.userAgent)&&!/chrome/i.test(navigator.userAgent);
+      const isStandalone=window.matchMedia('(display-mode: standalone)').matches||window.navigator.standalone;
+      const dismissed=localStorage.getItem('shiftmate_install_dismissed');
+      return isIOS&&isSafari&&!isStandalone&&!dismissed;
+    }catch{return false;}
+  });
+  function dismissInstall(){
+    try{localStorage.setItem('shiftmate_install_dismissed','true');}catch{}
+    setShowInstall(false);
+  }
   const [showDisclaimer,setShowDisclaimer]=useState(()=>{
     try{return !localStorage.getItem("dripaiv3_disclaimer_accepted");}catch{return true;}
   });
@@ -397,7 +450,11 @@ export default function App(){
   }
   function updateLine(id,field,value){setLines(prev=>prev.map(l=>l.id===id?{...l,[field]:value}:l));}
   function removeLine(id){setLines(prev=>prev.filter(l=>l.id!==id));}
-  function clearAll(){if(!lines.length)return;if(window.confirm("Clear all lines for this shift?"))setLines([]);}
+  const [confirmClear, setConfirmClear] = useState(false);
+  function clearAll(){
+    if(!lines.length) return;
+    setConfirmClear(true);
+  }
   function clearHighlight(){setTimeout(()=>setLines(prev=>prev.map(l=>({...l,highlight:false}))),1600);}
 
   async function submit(text){
@@ -470,7 +527,7 @@ export default function App(){
           <span style={{fontFamily:"IBM Plex Mono",fontSize:10,letterSpacing:2,textTransform:"uppercase",color:COLORS.muted}}>Active IV Lines</span>
           <div style={{display:"flex",gap:8}}>
             {lines.length>0&&<button onClick={clearAll} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"5px 10px",color:COLORS.muted,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer"}}>Clear shift</button>}
-            <button onClick={()=>addLine()} style={{background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"5px 12px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:11,cursor:"pointer"}}>+ Add manually</button>
+            <button onClick={()=>addLine({},'manual')} style={{background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"5px 12px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:11,cursor:"pointer"}}>+ Add manually</button>
           </div>
         </div>
 
@@ -487,6 +544,24 @@ export default function App(){
           </div>
         )}
       </div>
+
+      {/* iOS Install Prompt */}
+      {showInstall&&!showDisclaimer&&<InstallPrompt onDismiss={dismissInstall}/>}
+
+      {/* Confirm Clear Modal */}
+      {confirmClear&&(
+        <div style={{position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,0.7)",display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+          <div style={{background:COLORS.surface,border:`1px solid ${COLORS.border}`,borderRadius:16,padding:24,maxWidth:320,width:"100%",textAlign:"center"}}>
+            <div style={{fontSize:32,marginBottom:12}}>🗑️</div>
+            <div style={{fontFamily:"IBM Plex Mono",fontSize:14,fontWeight:600,color:COLORS.text,marginBottom:8}}>Clear all lines?</div>
+            <div style={{fontFamily:"IBM Plex Sans",fontSize:13,color:COLORS.muted,marginBottom:20}}>This will remove all active IV lines for this shift.</div>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>setConfirmClear(false)} style={{flex:1,background:"none",border:`1px solid ${COLORS.border}`,borderRadius:8,padding:"12px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12,cursor:"pointer"}}>Cancel</button>
+              <button onClick={()=>{setLines([]);setConfirmClear(false);}} style={{flex:1,background:`linear-gradient(135deg,${COLORS.danger},#c0392b)`,border:"none",borderRadius:8,padding:"12px",color:"#fff",fontFamily:"IBM Plex Mono",fontSize:12,fontWeight:600,cursor:"pointer"}}>Clear shift</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Disclaimer */}
       {showDisclaimer&&<DisclaimerModal onAccept={acceptDisclaimer}/>}
