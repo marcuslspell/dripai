@@ -1,9 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-
 const STORAGE_KEY = "dripaiv3_lines";
 const ID_KEY      = "dripaiv3_nextid";
-const API_KEY     = import.meta.env.VITE_ANTHROPIC_KEY;
 
 const COLORS = {
   bg:"#0a0f1a",surface:"#111827",surface2:"#1a2235",border:"#1f2d45",
@@ -18,68 +16,45 @@ const STATUS_STYLES = {
 };
 
 const CHAT_SYSTEM = `You are a private, confidential clinical nursing assistant. Nurses ask you questions they can't safely ask colleagues or supervisors without risking judgment or their job.
-
 Your role:
 - Answer clinical nursing questions about medications, IV drips, protocols, safety, and procedures
 - Be direct, clear, and non-judgmental — no question is dumb here
 - Give practical, actionable answers a bedside nurse can use immediately
 - Always note when something requires a pharmacist, physician, or charge nurse to confirm
 - Never make the nurse feel bad for asking
-
-Key topics you handle:
-- IV medications, drip rates, compatibility, hanging protocols
-- Medication safety (e.g. high-alert drugs like potassium, heparin, insulin, nitroprusside)
-- Common clinical protocols and procedures
-- Drug interactions and contraindications at a nursing level
-- Weight-based dosing concepts (mcg/kg/min, units/kg/hr)
-- When to escalate vs handle independently
-- High-alert medication double-check requirements
-
-Drug knowledge you have:
-- Vasopressors: dopamine, norepinephrine, epinephrine, vasopressin, dobutamine, phenylephrine
-- Sedation/analgesia: propofol, midazolam, dexmedetomidine, fentanyl, morphine, hydromorphone
-- Anticoagulants: heparin, argatroban
-- Cardiac: amiodarone, diltiazem, labetalol, nicardipine, nitroglycerin, nitroprusside, milrinone
-- Electrolytes: potassium, magnesium, calcium gluconate, sodium bicarbonate
-- Endocrine: insulin
-- Diuretics: furosemide
-- Antibiotics: vancomycin, piperacillin-tazobactam
-- Thrombolytics: alteplase/tPA
-- Nutrition: TPN
-
-Important: You are NOT a replacement for clinical judgment, physician orders, or hospital policy. Always remind nurses to verify with their facility's protocols when relevant. Keep answers concise — nurses are busy.
-
+Key topics: IV medications, drip rates, compatibility, hanging protocols, medication safety, high-alert drugs like potassium/heparin/insulin, clinical protocols, drug interactions, weight-based dosing, when to escalate.
+Important: You are NOT a replacement for clinical judgment, physician orders, or hospital policy. Always remind nurses to verify with their facility's protocols. Keep answers concise — nurses are busy.
 Start every conversation with warmth. This is a safe space.`;
 
-function calcMlHr(vol,min){if(!vol||!min||min<=0)return null;return(vol/min)*60;}
-function fmtTime(min){if(!min)return"—";if(min<60)return`${min}min`;const h=min/60;return h%1===0?`${h}hr`:`${h.toFixed(1)}hr`;}
-function loadLines(){try{const s=localStorage.getItem(STORAGE_KEY);return s?JSON.parse(s):[];}catch{return[];}}
-function loadNextId(){try{return parseInt(localStorage.getItem(ID_KEY)||"1");}catch{return 1;}}
-
-const PARSE_SYSTEM=`You are a clinical IV rate calculation assistant. Parse nursing instructions about IV drips.
+const PARSE_SYSTEM = `You are a clinical IV rate calculation assistant. Parse nursing instructions about IV drips.
 Convert time: "1 hour"=60,"2 hours"=120,"30 minutes"=30,"half hour"=30,"90 min"=90.
 If instruction updates an existing line (words: change,update,adjust,switch,modify), set action="update".
 If adding new line, set action="add".
 Respond ONLY with valid compact JSON, no markdown, no explanation:
 {"action":"add|update","room":"string or null","drug":"string or null","volumeMl":number_or_null,"timeMin":number_or_null,"notes":"string or null","warning":"string or null","summary":"plain English one sentence"}`;
 
-async function callAPI(messages, system){
-  const resp = await fetch("/api/parse",{
+function calcMlHr(vol,min){if(!vol||!min||min<=0)return null;return(vol/min)*60;}
+function fmtTime(min){if(!min)return"—";if(min<60)return`${min}min`;const h=min/60;return h%1===0?`${h}hr`:`${h.toFixed(1)}hr`;}
+function loadLines(){try{const s=localStorage.getItem(STORAGE_KEY);return s?JSON.parse(s):[];}catch{return[];}}
+function loadNextId(){try{return parseInt(localStorage.getItem(ID_KEY)||"1");}catch{return 1;}}
+
+async function callAPI(messages,system,max_tokens=600){
+  const resp=await fetch("/api/parse",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({system, messages, max_tokens:600}),
+    body:JSON.stringify({system,messages,max_tokens}),
   });
-  if(!resp.ok) throw new Error(`API ${resp.status}`);
-  const data = await resp.json();
+  if(!resp.ok)throw new Error(`API ${resp.status}`);
+  const data=await resp.json();
   return data.content.map(c=>c.text||"").join("").trim();
 }
 
 async function parseWithAI(text){
-  const raw = await callAPI([{role:"user",content:text}], PARSE_SYSTEM);
+  const raw=await callAPI([{role:"user",content:text}],PARSE_SYSTEM,400);
   return JSON.parse(raw.replace(/```json|```/g,"").trim());
 }
 
-// ─── iOS Install Prompt ───────────────────────────────────────────────────────
+// ─── Install Prompt ───────────────────────────────────────────────────────────
 function InstallPrompt({onDismiss}){
   return(
     <div style={{position:"fixed",bottom:0,left:0,right:0,zIndex:999,padding:"0 16px 16px",animation:"slideUp 0.4s ease"}}>
@@ -94,13 +69,11 @@ function InstallPrompt({onDismiss}){
           </div>
           <button onClick={onDismiss} style={{background:"none",border:"none",color:COLORS.muted,fontSize:18,cursor:"pointer",padding:"0 0 0 8px",flexShrink:0}}>✕</button>
         </div>
-
-        {/* Steps */}
         <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:14}}>
           {[
-            {icon:"1️⃣", text:<>Tap the <strong style={{color:COLORS.accent}}>Share</strong> button <span style={{fontSize:16}}>⎙</span> at the bottom of Safari</>},
-            {icon:"2️⃣", text:<>Scroll down and tap <strong style={{color:COLORS.accent}}>"Add to Home Screen"</strong></>},
-            {icon:"3️⃣", text:<>Tap <strong style={{color:COLORS.accent}}>"Add"</strong> — done! ShiftMate lives on your home screen</>},
+            {icon:"1️⃣",text:<>Tap the <strong style={{color:COLORS.accent}}>Share</strong> button ⎙ at the bottom of Safari</>},
+            {icon:"2️⃣",text:<>Scroll down and tap <strong style={{color:COLORS.accent}}>"Add to Home Screen"</strong></>},
+            {icon:"3️⃣",text:<>Tap <strong style={{color:COLORS.accent}}>"Add"</strong> — done! ShiftMate lives on your home screen</>},
           ].map((s,i)=>(
             <div key={i} style={{display:"flex",alignItems:"flex-start",gap:10,background:COLORS.surface2,borderRadius:8,padding:"9px 12px"}}>
               <span style={{fontSize:16,flexShrink:0}}>{s.icon}</span>
@@ -108,13 +81,10 @@ function InstallPrompt({onDismiss}){
             </div>
           ))}
         </div>
-
-        {/* Arrow pointing down to share button */}
         <div style={{textAlign:"center",fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.accent,animation:"bounce 1.5s ease-in-out infinite"}}>
           ↓ Share button is at the bottom of your screen
         </div>
       </div>
-      <style>{`@keyframes slideUp{from{opacity:0;transform:translateY(40px)}to{opacity:1;transform:translateY(0)}}`}</style>
     </div>
   );
 }
@@ -124,21 +94,18 @@ function DisclaimerModal({onAccept}){
   return(
     <div style={{position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,0.85)",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
       <div style={{background:COLORS.surface,border:`1px solid ${COLORS.border}`,borderRadius:16,maxWidth:420,width:"100%",overflow:"hidden"}}>
-        {/* Header */}
         <div style={{background:`linear-gradient(135deg,${COLORS.purple},${COLORS.blue})`,padding:"20px 24px"}}>
           <div style={{fontSize:28,marginBottom:8}}>⚕️</div>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:16,fontWeight:700,color:"#fff"}}>Before You Use ShiftMate</div>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:"rgba(255,255,255,0.7)",marginTop:4}}>Please read and acknowledge</div>
         </div>
-
-        {/* Body */}
         <div style={{padding:"20px 24px"}}>
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
             {[
-              {icon:"🧮", text:"DripAI is a calculation aid only. Always verify results independently before acting."},
-              {icon:"🚫", text:"This is not medical advice and does not replace clinical judgment, physician orders, or your facility's protocols."},
-              {icon:"🔒", text:"Do not enter patient names, MRNs, or any identifying information. Questions are processed by a third-party AI service."},
-              {icon:"⚠️", text:"Use of this tool is at your own risk. This is a beta product under active development."},
+              {icon:"🧮",text:"ShiftMate is a calculation aid only. Always verify results independently before acting."},
+              {icon:"🚫",text:"This is not medical advice and does not replace clinical judgment, physician orders, or your facility's protocols."},
+              {icon:"🔒",text:"Do not enter patient names, MRNs, or any identifying information. Questions are processed by a third-party AI service."},
+              {icon:"⚠️",text:"Use of this tool is at your own risk. This is a beta product under active development."},
             ].map((item,i)=>(
               <div key={i} style={{display:"flex",gap:12,alignItems:"flex-start"}}>
                 <span style={{fontSize:18,flexShrink:0,marginTop:1}}>{item.icon}</span>
@@ -146,12 +113,9 @@ function DisclaimerModal({onAccept}){
               </div>
             ))}
           </div>
-
-          <button onClick={onAccept}
-            style={{width:"100%",marginTop:20,background:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,border:"none",borderRadius:10,padding:"14px",color:"#0a0f1a",fontFamily:"IBM Plex Mono",fontSize:13,fontWeight:700,cursor:"pointer",letterSpacing:0.5}}>
+          <button onClick={onAccept} style={{width:"100%",marginTop:20,background:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,border:"none",borderRadius:10,padding:"14px",color:"#0a0f1a",fontFamily:"IBM Plex Mono",fontSize:13,fontWeight:700,cursor:"pointer"}}>
             I Understand — Continue to ShiftMate
           </button>
-
           <div style={{textAlign:"center",marginTop:10,fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.muted}}>
             This acknowledgment is saved on your device
           </div>
@@ -161,46 +125,37 @@ function DisclaimerModal({onAccept}){
   );
 }
 
-// ─── Chat Component ───────────────────────────────────────────────────────────
+// ─── Chat Overlay ─────────────────────────────────────────────────────────────
 function ChatOverlay({onClose}){
-  const [messages, setMessages] = useState([
-    {role:"assistant", content:"Hey — this is your safe space. No judgment here, ever.\n\nAsk me anything clinical: meds, drip protocols, drug safety, procedures. The question you can't ask out loud? Ask it here."}
+  const [messages,setMessages]=useState([
+    {role:"assistant",content:"Hey — this is your safe space. No judgment here, ever.\n\nAsk me anything clinical: meds, drip protocols, drug safety, procedures. The question you can't ask out loud? Ask it here."}
   ]);
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const bottomRef = useRef();
-  const inputRef = useRef();
+  const [input,setInput]=useState("");
+  const [loading,setLoading]=useState(false);
+  const bottomRef=useRef();
+  const inputRef=useRef();
 
-  useEffect(()=>{
-    bottomRef.current?.scrollIntoView({behavior:"smooth"});
-  },[messages]);
-
-  useEffect(()=>{
-    setTimeout(()=>inputRef.current?.focus(), 100);
-  },[]);
+  useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:"smooth"});},[messages]);
+  useEffect(()=>{setTimeout(()=>inputRef.current?.focus(),100);},[]);
 
   async function send(){
-    const txt = input.trim();
-    if(!txt||loading) return;
-    const newMessages = [...messages, {role:"user", content:txt}];
+    const txt=input.trim();
+    if(!txt||loading)return;
+    const newMessages=[...messages,{role:"user",content:txt}];
     setMessages(newMessages);
     setInput("");
     setLoading(true);
     try{
-      const reply = await callAPI(
-        newMessages.map(m=>({role:m.role, content:m.content})),
-        CHAT_SYSTEM
-      );
-      setMessages(prev=>[...prev, {role:"assistant", content:reply}]);
+      const reply=await callAPI(newMessages.map(m=>({role:m.role,content:m.content})),CHAT_SYSTEM,600);
+      setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
     }catch(e){
-      setMessages(prev=>[...prev, {role:"assistant", content:"Sorry, I couldn't connect. Check your internet and try again."}]);
+      setMessages(prev=>[...prev,{role:"assistant",content:"Sorry, couldn't connect. Check your internet and try again."}]);
     }
     setLoading(false);
   }
 
   return(
     <div style={{position:"fixed",inset:0,zIndex:1000,display:"flex",flexDirection:"column",background:COLORS.bg}}>
-      {/* Header */}
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"16px",borderBottom:`1px solid ${COLORS.border}`,flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <div style={{width:36,height:36,borderRadius:"50%",background:`linear-gradient(135deg,${COLORS.purple},${COLORS.blue})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🔒</div>
@@ -211,53 +166,32 @@ function ChatOverlay({onClose}){
         </div>
         <button onClick={onClose} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:8,padding:"6px 12px",color:COLORS.muted,cursor:"pointer",fontFamily:"IBM Plex Mono",fontSize:12}}>✕ Close</button>
       </div>
-
-      {/* Messages */}
       <div style={{flex:1,overflowY:"auto",padding:"16px",display:"flex",flexDirection:"column",gap:12}}>
         {messages.map((m,i)=>(
           <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
-            <div style={{
-              maxWidth:"85%",
-              padding:"12px 14px",
-              borderRadius: m.role==="user" ? "12px 12px 2px 12px" : "12px 12px 12px 2px",
-              background: m.role==="user" ? `linear-gradient(135deg,${COLORS.purple},${COLORS.blue})` : COLORS.surface,
-              border: m.role==="user" ? "none" : `1px solid ${COLORS.border}`,
-              color: COLORS.text,
-              fontSize:14,
-              lineHeight:1.6,
-              fontFamily:"IBM Plex Sans",
-              whiteSpace:"pre-wrap",
-            }}>
+            <div style={{maxWidth:"85%",padding:"12px 14px",borderRadius:m.role==="user"?"12px 12px 2px 12px":"12px 12px 12px 2px",background:m.role==="user"?`linear-gradient(135deg,${COLORS.purple},${COLORS.blue})`:COLORS.surface,border:m.role==="user"?"none":`1px solid ${COLORS.border}`,color:COLORS.text,fontSize:14,lineHeight:1.6,fontFamily:"IBM Plex Sans",whiteSpace:"pre-wrap"}}>
               {m.content}
             </div>
           </div>
         ))}
-        {loading && (
+        {loading&&(
           <div style={{display:"flex",justifyContent:"flex-start"}}>
             <div style={{padding:"12px 16px",borderRadius:"12px 12px 12px 2px",background:COLORS.surface,border:`1px solid ${COLORS.border}`}}>
               <div style={{display:"flex",gap:4,alignItems:"center"}}>
-                {[0,1,2].map(i=>(
-                  <div key={i} style={{width:6,height:6,borderRadius:"50%",background:COLORS.purple,animation:`bounce 1.2s ease-in-out ${i*0.2}s infinite`}}/>
-                ))}
+                {[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:COLORS.purple,animation:`bounce 1.2s ease-in-out ${i*0.2}s infinite`}}/>)}
               </div>
             </div>
           </div>
         )}
         <div ref={bottomRef}/>
       </div>
-
-      {/* Input */}
       <div style={{padding:"12px 16px",borderTop:`1px solid ${COLORS.border}`,flexShrink:0,background:COLORS.bg}}>
         <div style={{display:"flex",gap:10,alignItems:"flex-end"}}>
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={e=>setInput(e.target.value)}
+          <textarea ref={inputRef} value={input} onChange={e=>setInput(e.target.value)}
             onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
             placeholder="Ask the question you can't ask out loud..."
             rows={2}
-            style={{flex:1,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:8,padding:"10px 12px",color:COLORS.text,fontSize:14,fontFamily:"IBM Plex Sans",resize:"none",outline:"none",lineHeight:1.5}}
-          />
+            style={{flex:1,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:8,padding:"10px 12px",color:COLORS.text,fontSize:14,fontFamily:"IBM Plex Sans",resize:"none",outline:"none",lineHeight:1.5}}/>
           <button onClick={send} disabled={loading||!input.trim()}
             style={{background:loading||!input.trim()?COLORS.surface2:`linear-gradient(135deg,${COLORS.purple},${COLORS.blue})`,border:"none",borderRadius:8,padding:"10px 16px",color:loading||!input.trim()?COLORS.muted:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12,fontWeight:600,cursor:loading||!input.trim()?"not-allowed":"pointer",whiteSpace:"nowrap",height:44}}>
             Send
@@ -267,8 +201,6 @@ function ChatOverlay({onClose}){
           Always verify with your facility's protocols • Not a replacement for clinical judgment
         </div>
       </div>
-
-      <style>{`@keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}`}</style>
     </div>
   );
 }
@@ -305,74 +237,17 @@ function VoiceButton({onTranscript,disabled}){
   );
 }
 
-// ─── Drug Info Panel ──────────────────────────────────────────────────────────
-function DrugPanel({drug}){
-  if(!drug) return null;
-  return(
-    <div style={{background:drug.highAlert?"rgba(239,68,68,0.06)":"rgba(0,212,170,0.04)",border:`1px solid ${drug.highAlert?"rgba(239,68,68,0.25)":"rgba(0,212,170,0.15)"}`,borderRadius:8,padding:"10px 12px",marginBottom:10}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-        {drug.highAlert&&<span style={{background:"rgba(239,68,68,0.15)",color:COLORS.danger,fontFamily:"IBM Plex Mono",fontSize:9,fontWeight:700,padding:"2px 7px",borderRadius:4,letterSpacing:1}}>HIGH ALERT</span>}
-        <span style={{background:COLORS.surface2,color:COLORS.muted,fontFamily:"IBM Plex Mono",fontSize:9,padding:"2px 7px",borderRadius:4}}>{drug.category}</span>
-        {drug.weightBased&&<span style={{background:COLORS.surface2,color:COLORS.blue,fontFamily:"IBM Plex Mono",fontSize:9,padding:"2px 7px",borderRadius:4}}>WEIGHT-BASED</span>}
-      </div>
-      {drug.typicalConcentration&&(
-        <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginBottom:4}}>
-          <span style={{color:COLORS.text}}>Typical concentration:</span> {drug.typicalConcentration}
-        </div>
-      )}
-      {drug.ranges&&Object.values(drug.ranges).filter(r=>r.label).map((r,i)=>(
-        <div key={i} style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginBottom:2}}>
-          <span style={{color:COLORS.accent}}>{r.min!==r.max?`${r.min}–${r.max}`:`${r.min}`} {drug.unit}</span>
-          <span style={{color:COLORS.muted}}> — {r.label}</span>
-        </div>
-      ))}
-      {drug.notes&&(
-        <div style={{fontFamily:"IBM Plex Sans",fontSize:12,color:COLORS.muted,marginTop:6,lineHeight:1.5,borderTop:`1px solid ${drug.highAlert?"rgba(239,68,68,0.15)":"rgba(0,212,170,0.1)"}`,paddingTop:6}}>
-          {drug.notes}
-        </div>
-      )}
-      {drug.incompatible&&drug.incompatible.length>0&&(
-        <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.warn,marginTop:6}}>
-          ⚠ Incompatible: {drug.incompatible.join(", ")}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ─── Line Card ────────────────────────────────────────────────────────────────
 function LineCard({line,onUpdate,onRemove}){
   const rate=calcMlHr(line.volumeMl,line.timeMin);
-  const drug=lookupDrug(line.drug);
   const flagged=rate&&rate>500;
-  const [showDrug,setShowDrug]=useState(false);
-
-  // Auto show drug info when drug is recognized
-  useEffect(()=>{
-    if(drug) setShowDrug(true);
-  },[drug?.name]);
-
-  const borderColor=line.highlight?COLORS.accent:drug?.highAlert?COLORS.danger:flagged?COLORS.warn:COLORS.border;
-
   return(
-    <div style={{background:COLORS.surface,border:`1px solid ${borderColor}`,borderRadius:12,padding:16,boxShadow:line.highlight?"0 0 16px rgba(0,212,170,0.13)":drug?.highAlert?"0 0 12px rgba(239,68,68,0.08)":"none",transition:"border-color 0.4s, box-shadow 0.4s"}}>
-
-      {/* Top row */}
+    <div style={{background:COLORS.surface,border:`1px solid ${line.highlight?COLORS.accent:flagged?COLORS.warn:COLORS.border}`,borderRadius:12,padding:16,boxShadow:line.highlight?"0 0 16px rgba(0,212,170,0.13)":"none",transition:"border-color 0.4s, box-shadow 0.4s"}}>
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
         <div style={{background:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,color:"#0a0f1a",fontFamily:"IBM Plex Mono",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:5,whiteSpace:"nowrap"}}>RM {line.room||"?"}</div>
-        <div style={{flex:1,fontSize:14,fontWeight:500,color:line.drug?COLORS.text:COLORS.muted}}>{drug?drug.name:line.drug||"No drug entered"}</div>
-        {drug&&(
-          <button onClick={()=>setShowDrug(v=>!v)} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"3px 8px",color:COLORS.muted,cursor:"pointer",fontSize:11,fontFamily:"IBM Plex Mono"}}>
-            {showDrug?"▲":"▼ info"}
-          </button>
-        )}
+        <div style={{flex:1,fontSize:14,fontWeight:500,color:line.drug?COLORS.text:COLORS.muted}}>{line.drug||"No drug entered"}</div>
         <button onClick={()=>onRemove(line.id)} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"4px 9px",color:COLORS.muted,cursor:"pointer",fontSize:12}}>✕</button>
       </div>
-
-      {/* Drug info panel */}
-      {drug&&showDrug&&<DrugPanel drug={drug}/>}
-
-      {/* Fields */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8,marginBottom:12}}>
         {[{label:"Room",field:"room",placeholder:"4A",type:"text"},{label:"Drug / Fluid",field:"drug",placeholder:"Heparin",type:"text"},{label:"Volume (mL)",field:"volumeMl",placeholder:"100",type:"number"},{label:"Over (min)",field:"timeMin",placeholder:"60",type:"number"},{label:"Notes",field:"notes",placeholder:"optional",type:"text"}].map(f=>(
           <div key={f.field}>
@@ -383,19 +258,13 @@ function LineCard({line,onUpdate,onRemove}){
           </div>
         ))}
       </div>
-
-      {/* Result */}
       <div style={{background:COLORS.surface2,borderRadius:8,padding:"11px 14px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
         <div>
           <span style={{fontFamily:"IBM Plex Mono",fontSize:24,fontWeight:700,color:COLORS.accent}}>{rate?rate.toFixed(1):"—"}</span>
           <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>mL/hr</span>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginTop:2}}>{line.volumeMl||"—"}mL over {fmtTime(line.timeMin)}</div>
         </div>
-        <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
-          {drug?.highAlert&&<div style={{background:"rgba(239,68,68,0.12)",color:COLORS.danger,border:"1px solid rgba(239,68,68,0.3)",fontFamily:"IBM Plex Mono",fontSize:10,padding:"3px 8px",borderRadius:5}}>⚠ HIGH ALERT</div>}
-          {flagged&&<div style={{background:"rgba(245,158,11,0.12)",color:COLORS.warn,border:"1px solid rgba(245,158,11,0.3)",fontFamily:"IBM Plex Mono",fontSize:10,padding:"3px 8px",borderRadius:5}}>⚠ Verify rate</div>}
-          {!drug&&line.drug&&<div style={{fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.muted}}>Drug not in DB</div>}
-        </div>
+        {flagged&&<div style={{background:"rgba(245,158,11,0.12)",color:COLORS.warn,border:"1px solid rgba(245,158,11,0.3)",fontFamily:"IBM Plex Mono",fontSize:10,padding:"4px 9px",borderRadius:5}}>⚠ Verify rate</div>}
       </div>
     </div>
   );
@@ -410,6 +279,10 @@ export default function App(){
   const [status,setStatus]=useState(null);
   const [clock,setClock]=useState("");
   const [chatOpen,setChatOpen]=useState(false);
+  const [confirmClear,setConfirmClear]=useState(false);
+  const [showDisclaimer,setShowDisclaimer]=useState(()=>{
+    try{return !localStorage.getItem("shiftmate_disclaimer_accepted");}catch{return true;}
+  });
   const [showInstall,setShowInstall]=useState(()=>{
     try{
       const isIOS=/iphone|ipad|ipod/i.test(navigator.userAgent);
@@ -419,19 +292,6 @@ export default function App(){
       return isIOS&&isSafari&&!isStandalone&&!dismissed;
     }catch{return false;}
   });
-  function dismissInstall(){
-    try{localStorage.setItem('shiftmate_install_dismissed','true');}catch{}
-    setShowInstall(false);
-  }
-  const [showDisclaimer,setShowDisclaimer]=useState(()=>{
-    try{return !localStorage.getItem("dripaiv3_disclaimer_accepted");}catch{return true;}
-  });
-
-  function acceptDisclaimer(){
-    try{localStorage.setItem("dripaiv3_disclaimer_accepted","true");}catch{}
-    setShowDisclaimer(false);
-    if(window.gtag) window.gtag('event','disclaimer_accepted');
-  }
 
   useEffect(()=>{
     const tick=()=>setClock(new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}));
@@ -443,18 +303,27 @@ export default function App(){
   },[lines,nextId]);
 
   function showStatus(msg,type="success"){setStatus({msg,type});setTimeout(()=>setStatus(null),4500);}
+
+  function acceptDisclaimer(){
+    try{localStorage.setItem("shiftmate_disclaimer_accepted","true");}catch{}
+    setShowDisclaimer(false);
+    if(window.gtag)window.gtag('event','disclaimer_accepted');
+  }
+
+  function dismissInstall(){
+    try{localStorage.setItem('shiftmate_install_dismissed','true');}catch{}
+    setShowInstall(false);
+  }
+
   function addLine(data={},source="manual"){
     setLines(prev=>[...prev,{id:nextId,room:data.room||"",drug:data.drug||"",volumeMl:data.volumeMl||"",timeMin:data.timeMin||"",notes:data.notes||"",highlight:data.highlight||false}]);
     setNextId(n=>n+1);
-    if(window.gtag) window.gtag('event','line_added',{source});
+    if(window.gtag)window.gtag('event','line_added',{source});
   }
+
   function updateLine(id,field,value){setLines(prev=>prev.map(l=>l.id===id?{...l,[field]:value}:l));}
   function removeLine(id){setLines(prev=>prev.filter(l=>l.id!==id));}
-  const [confirmClear, setConfirmClear] = useState(false);
-  function clearAll(){
-    if(!lines.length) return;
-    setConfirmClear(true);
-  }
+  function clearAll(){if(!lines.length)return;setConfirmClear(true);}
   function clearHighlight(){setTimeout(()=>setLines(prev=>prev.map(l=>({...l,highlight:false}))),1600);}
 
   async function submit(text){
@@ -468,11 +337,13 @@ export default function App(){
         if(existing){
           setLines(prev=>prev.map(l=>l.id===existing.id?{...l,...(parsed.volumeMl!=null&&{volumeMl:parsed.volumeMl}),...(parsed.timeMin!=null&&{timeMin:parsed.timeMin}),...(parsed.drug&&{drug:parsed.drug}),...(parsed.notes&&{notes:parsed.notes}),highlight:true}:l));
           clearHighlight();showStatus("✓ "+(parsed.summary||"Line updated"));
-          if(window.gtag) window.gtag('event','ai_parse',{action:'update'});
+          if(window.gtag)window.gtag('event','ai_parse',{action:'update'});
         }else{addLine({...parsed,highlight:true},'ai');clearHighlight();showStatus("✓ Room not found — added as new line");}
-      }else{addLine({...parsed,highlight:true},'ai');clearHighlight();showStatus("✓ "+(parsed.summary||"Line added"));
-        if(window.gtag) window.gtag('event','ai_parse',{action:'add'});
-      }      if(parsed.warning)setTimeout(()=>showStatus("⚠ "+parsed.warning,"warn"),600);
+      }else{
+        addLine({...parsed,highlight:true},'ai');clearHighlight();showStatus("✓ "+(parsed.summary||"Line added"));
+        if(window.gtag)window.gtag('event','ai_parse',{action:'add'});
+      }
+      if(parsed.warning)setTimeout(()=>showStatus("⚠ "+parsed.warning,"warn"),600);
       setInput("");
     }catch(e){showStatus("Could not parse — try rephrasing or add manually","error");}
     setLoading(false);
@@ -480,7 +351,7 @@ export default function App(){
 
   function onVoiceTranscript(transcript){
     setInput(transcript);
-    if(window.gtag) window.gtag('event','ai_parse',{method:'voice'});
+    if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});
     setTimeout(()=>submit(transcript),100);
   }
 
@@ -510,7 +381,7 @@ export default function App(){
             <VoiceButton onTranscript={onVoiceTranscript} disabled={loading}/>
             <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&!loading&&submit()}
               placeholder="e.g. add room 7 heparin 125ml over 60 min"
-              style={{flex:1,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:8,padding:"12px 14px",color:COLORS.text,fontSize:14,fontFamily:"IBM Plex Sans"}}/>
+              style={{flex:1,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:8,padding:"12px 14px",color:COLORS.text,fontSize:14,fontFamily:"IBM Plex Sans",outline:"none"}}/>
             <button onClick={()=>submit()} disabled={loading||!input.trim()}
               style={{background:loading||!input.trim()?COLORS.surface2:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,border:"none",borderRadius:8,padding:"12px 18px",color:loading||!input.trim()?COLORS.muted:"#0a0f1a",fontFamily:"IBM Plex Mono",fontSize:12,fontWeight:600,cursor:loading||!input.trim()?"not-allowed":"pointer",whiteSpace:"nowrap",minWidth:72}}>
               {loading?"...":"Parse"}
@@ -531,7 +402,7 @@ export default function App(){
           </div>
         </div>
 
-        {/* Lines */}
+        {/* Lines list */}
         {lines.length===0?(
           <div style={{textAlign:"center",padding:"52px 24px",color:COLORS.muted}}>
             <div style={{fontSize:42,marginBottom:12,opacity:0.35}}>💊</div>
@@ -545,7 +416,7 @@ export default function App(){
         )}
       </div>
 
-      {/* iOS Install Prompt */}
+      {/* Install Prompt */}
       {showInstall&&!showDisclaimer&&<InstallPrompt onDismiss={dismissInstall}/>}
 
       {/* Confirm Clear Modal */}
@@ -568,28 +439,25 @@ export default function App(){
 
       {/* Floating Chat Button */}
       {!chatOpen&&(
-        <button onClick={()=>{setChatOpen(true);if(window.gtag)window.gtag('event','chat_opened');}}
-          style={{position:"fixed",bottom:24,right:24,width:60,height:60,borderRadius:"50%",background:`linear-gradient(135deg,${COLORS.purple},${COLORS.blue})`,border:"none",boxShadow:"0 4px 20px rgba(168,85,247,0.4)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,zIndex:100,transition:"transform 0.2s"}}
-          onMouseEnter={e=>e.target.style.transform="scale(1.1)"}
-          onMouseLeave={e=>e.target.style.transform="scale(1)"}>
-          🔒
-        </button>
+        <>
+          <button onClick={()=>{setChatOpen(true);if(window.gtag)window.gtag('event','chat_opened');}}
+            style={{position:"fixed",bottom:24,right:24,width:60,height:60,borderRadius:"50%",background:`linear-gradient(135deg,${COLORS.purple},${COLORS.blue})`,border:"none",boxShadow:"0 4px 20px rgba(168,85,247,0.4)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,zIndex:100}}>
+            🔒
+          </button>
+          <div style={{position:"fixed",bottom:90,right:16,background:COLORS.surface,border:`1px solid ${COLORS.purple}`,borderRadius:8,padding:"6px 12px",fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.purple,zIndex:100,pointerEvents:"none",whiteSpace:"nowrap"}}>
+            Ask the question you can't ask out loud
+          </div>
+        </>
       )}
 
-      {/* Tooltip on button */}
-      {!chatOpen&&(
-        <div style={{position:"fixed",bottom:90,right:16,background:COLORS.surface,border:`1px solid ${COLORS.purple}`,borderRadius:8,padding:"6px 12px",fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.purple,zIndex:100,pointerEvents:"none",whiteSpace:"nowrap"}}>
-          Ask the question you can't ask out loud
-        </div>
-      )}
-
-      {/* Chat Overlay */}
+      {/* Chat */}
       {chatOpen&&<ChatOverlay onClose={()=>setChatOpen(false)}/>}
 
       <style>{`
         @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.4;transform:scale(0.8)}}
         @keyframes ripple{0%{transform:scale(1);opacity:0.6}100%{transform:scale(2.2);opacity:0}}
         @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+        @keyframes slideUp{from{opacity:0;transform:translateY(40px)}to{opacity:1;transform:translateY(0)}}
         input:focus,textarea:focus{outline:none;border-color:#0ea5e9!important}
         input::placeholder,textarea::placeholder{color:#374151}
         input[type=number]::-webkit-inner-spin-button{opacity:0.3}
