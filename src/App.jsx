@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { lookupDrug } from "./drugDB.js";
+
 
 const STORAGE_KEY = "dripaiv3_lines";
 const ID_KEY      = "dripaiv3_nextid";
