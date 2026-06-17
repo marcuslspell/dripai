@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { lookupDrug } from "./drugDB.js";
 
 const STORAGE_KEY = "dripaiv3_lines";
 const ID_KEY      = "dripaiv3_nextid";
@@ -27,10 +28,24 @@ Your role:
 
 Key topics you handle:
 - IV medications, drip rates, compatibility, hanging protocols
-- Medication safety (e.g. high-alert drugs like potassium, heparin, insulin)
+- Medication safety (e.g. high-alert drugs like potassium, heparin, insulin, nitroprusside)
 - Common clinical protocols and procedures
 - Drug interactions and contraindications at a nursing level
+- Weight-based dosing concepts (mcg/kg/min, units/kg/hr)
 - When to escalate vs handle independently
+- High-alert medication double-check requirements
+
+Drug knowledge you have:
+- Vasopressors: dopamine, norepinephrine, epinephrine, vasopressin, dobutamine, phenylephrine
+- Sedation/analgesia: propofol, midazolam, dexmedetomidine, fentanyl, morphine, hydromorphone
+- Anticoagulants: heparin, argatroban
+- Cardiac: amiodarone, diltiazem, labetalol, nicardipine, nitroglycerin, nitroprusside, milrinone
+- Electrolytes: potassium, magnesium, calcium gluconate, sodium bicarbonate
+- Endocrine: insulin
+- Diuretics: furosemide
+- Antibiotics: vancomycin, piperacillin-tazobactam
+- Thrombolytics: alteplase/tPA
+- Nutrition: TPN
 
 Important: You are NOT a replacement for clinical judgment, physician orders, or hospital policy. Always remind nurses to verify with their facility's protocols when relevant. Keep answers concise — nurses are busy.
 
@@ -72,7 +87,7 @@ function DisclaimerModal({onAccept}){
         {/* Header */}
         <div style={{background:`linear-gradient(135deg,${COLORS.purple},${COLORS.blue})`,padding:"20px 24px"}}>
           <div style={{fontSize:28,marginBottom:8}}>⚕️</div>
-          <div style={{fontFamily:"IBM Plex Mono",fontSize:16,fontWeight:700,color:"#fff"}}>Before You Continue</div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:16,fontWeight:700,color:"#fff"}}>Before You Use ShiftMate</div>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:"rgba(255,255,255,0.7)",marginTop:4}}>Please read and acknowledge</div>
         </div>
 
@@ -94,7 +109,7 @@ function DisclaimerModal({onAccept}){
 
           <button onClick={onAccept}
             style={{width:"100%",marginTop:20,background:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,border:"none",borderRadius:10,padding:"14px",color:"#0a0f1a",fontFamily:"IBM Plex Mono",fontSize:13,fontWeight:700,cursor:"pointer",letterSpacing:0.5}}>
-            I Understand — Continue to DripAI
+            I Understand — Continue to ShiftMate
           </button>
 
           <div style={{textAlign:"center",marginTop:10,fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.muted}}>
@@ -250,17 +265,74 @@ function VoiceButton({onTranscript,disabled}){
   );
 }
 
+// ─── Drug Info Panel ──────────────────────────────────────────────────────────
+function DrugPanel({drug}){
+  if(!drug) return null;
+  return(
+    <div style={{background:drug.highAlert?"rgba(239,68,68,0.06)":"rgba(0,212,170,0.04)",border:`1px solid ${drug.highAlert?"rgba(239,68,68,0.25)":"rgba(0,212,170,0.15)"}`,borderRadius:8,padding:"10px 12px",marginBottom:10}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+        {drug.highAlert&&<span style={{background:"rgba(239,68,68,0.15)",color:COLORS.danger,fontFamily:"IBM Plex Mono",fontSize:9,fontWeight:700,padding:"2px 7px",borderRadius:4,letterSpacing:1}}>HIGH ALERT</span>}
+        <span style={{background:COLORS.surface2,color:COLORS.muted,fontFamily:"IBM Plex Mono",fontSize:9,padding:"2px 7px",borderRadius:4}}>{drug.category}</span>
+        {drug.weightBased&&<span style={{background:COLORS.surface2,color:COLORS.blue,fontFamily:"IBM Plex Mono",fontSize:9,padding:"2px 7px",borderRadius:4}}>WEIGHT-BASED</span>}
+      </div>
+      {drug.typicalConcentration&&(
+        <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginBottom:4}}>
+          <span style={{color:COLORS.text}}>Typical concentration:</span> {drug.typicalConcentration}
+        </div>
+      )}
+      {drug.ranges&&Object.values(drug.ranges).filter(r=>r.label).map((r,i)=>(
+        <div key={i} style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginBottom:2}}>
+          <span style={{color:COLORS.accent}}>{r.min!==r.max?`${r.min}–${r.max}`:`${r.min}`} {drug.unit}</span>
+          <span style={{color:COLORS.muted}}> — {r.label}</span>
+        </div>
+      ))}
+      {drug.notes&&(
+        <div style={{fontFamily:"IBM Plex Sans",fontSize:12,color:COLORS.muted,marginTop:6,lineHeight:1.5,borderTop:`1px solid ${drug.highAlert?"rgba(239,68,68,0.15)":"rgba(0,212,170,0.1)"}`,paddingTop:6}}>
+          {drug.notes}
+        </div>
+      )}
+      {drug.incompatible&&drug.incompatible.length>0&&(
+        <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.warn,marginTop:6}}>
+          ⚠ Incompatible: {drug.incompatible.join(", ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Line Card ────────────────────────────────────────────────────────────────
 function LineCard({line,onUpdate,onRemove}){
   const rate=calcMlHr(line.volumeMl,line.timeMin);
+  const drug=lookupDrug(line.drug);
   const flagged=rate&&rate>500;
+  const [showDrug,setShowDrug]=useState(false);
+
+  // Auto show drug info when drug is recognized
+  useEffect(()=>{
+    if(drug) setShowDrug(true);
+  },[drug?.name]);
+
+  const borderColor=line.highlight?COLORS.accent:drug?.highAlert?COLORS.danger:flagged?COLORS.warn:COLORS.border;
+
   return(
-    <div style={{background:COLORS.surface,border:`1px solid ${line.highlight?COLORS.accent:flagged?COLORS.warn:COLORS.border}`,borderRadius:12,padding:16,boxShadow:line.highlight?"0 0 16px rgba(0,212,170,0.13)":"none",transition:"border-color 0.4s, box-shadow 0.4s"}}>
+    <div style={{background:COLORS.surface,border:`1px solid ${borderColor}`,borderRadius:12,padding:16,boxShadow:line.highlight?"0 0 16px rgba(0,212,170,0.13)":drug?.highAlert?"0 0 12px rgba(239,68,68,0.08)":"none",transition:"border-color 0.4s, box-shadow 0.4s"}}>
+
+      {/* Top row */}
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
         <div style={{background:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,color:"#0a0f1a",fontFamily:"IBM Plex Mono",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:5,whiteSpace:"nowrap"}}>RM {line.room||"?"}</div>
-        <div style={{flex:1,fontSize:14,fontWeight:500,color:line.drug?COLORS.text:COLORS.muted}}>{line.drug||"No drug entered"}</div>
+        <div style={{flex:1,fontSize:14,fontWeight:500,color:line.drug?COLORS.text:COLORS.muted}}>{drug?drug.name:line.drug||"No drug entered"}</div>
+        {drug&&(
+          <button onClick={()=>setShowDrug(v=>!v)} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"3px 8px",color:COLORS.muted,cursor:"pointer",fontSize:11,fontFamily:"IBM Plex Mono"}}>
+            {showDrug?"▲":"▼ info"}
+          </button>
+        )}
         <button onClick={()=>onRemove(line.id)} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"4px 9px",color:COLORS.muted,cursor:"pointer",fontSize:12}}>✕</button>
       </div>
+
+      {/* Drug info panel */}
+      {drug&&showDrug&&<DrugPanel drug={drug}/>}
+
+      {/* Fields */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8,marginBottom:12}}>
         {[{label:"Room",field:"room",placeholder:"4A",type:"text"},{label:"Drug / Fluid",field:"drug",placeholder:"Heparin",type:"text"},{label:"Volume (mL)",field:"volumeMl",placeholder:"100",type:"number"},{label:"Over (min)",field:"timeMin",placeholder:"60",type:"number"},{label:"Notes",field:"notes",placeholder:"optional",type:"text"}].map(f=>(
           <div key={f.field}>
@@ -271,13 +343,19 @@ function LineCard({line,onUpdate,onRemove}){
           </div>
         ))}
       </div>
+
+      {/* Result */}
       <div style={{background:COLORS.surface2,borderRadius:8,padding:"11px 14px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
         <div>
           <span style={{fontFamily:"IBM Plex Mono",fontSize:24,fontWeight:700,color:COLORS.accent}}>{rate?rate.toFixed(1):"—"}</span>
           <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>mL/hr</span>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginTop:2}}>{line.volumeMl||"—"}mL over {fmtTime(line.timeMin)}</div>
         </div>
-        {flagged&&<div style={{background:"rgba(245,158,11,0.12)",color:COLORS.warn,border:"1px solid rgba(245,158,11,0.3)",fontFamily:"IBM Plex Mono",fontSize:10,padding:"4px 9px",borderRadius:5}}>⚠ Verify rate</div>}
+        <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
+          {drug?.highAlert&&<div style={{background:"rgba(239,68,68,0.12)",color:COLORS.danger,border:"1px solid rgba(239,68,68,0.3)",fontFamily:"IBM Plex Mono",fontSize:10,padding:"3px 8px",borderRadius:5}}>⚠ HIGH ALERT</div>}
+          {flagged&&<div style={{background:"rgba(245,158,11,0.12)",color:COLORS.warn,border:"1px solid rgba(245,158,11,0.3)",fontFamily:"IBM Plex Mono",fontSize:10,padding:"3px 8px",borderRadius:5}}>⚠ Verify rate</div>}
+          {!drug&&line.drug&&<div style={{fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.muted}}>Drug not in DB</div>}
+        </div>
       </div>
     </div>
   );
@@ -299,6 +377,7 @@ export default function App(){
   function acceptDisclaimer(){
     try{localStorage.setItem("dripaiv3_disclaimer_accepted","true");}catch{}
     setShowDisclaimer(false);
+    if(window.gtag) window.gtag('event','disclaimer_accepted');
   }
 
   useEffect(()=>{
@@ -311,9 +390,10 @@ export default function App(){
   },[lines,nextId]);
 
   function showStatus(msg,type="success"){setStatus({msg,type});setTimeout(()=>setStatus(null),4500);}
-  function addLine(data={}){
+  function addLine(data={},source="manual"){
     setLines(prev=>[...prev,{id:nextId,room:data.room||"",drug:data.drug||"",volumeMl:data.volumeMl||"",timeMin:data.timeMin||"",notes:data.notes||"",highlight:data.highlight||false}]);
     setNextId(n=>n+1);
+    if(window.gtag) window.gtag('event','line_added',{source});
   }
   function updateLine(id,field,value){setLines(prev=>prev.map(l=>l.id===id?{...l,[field]:value}:l));}
   function removeLine(id){setLines(prev=>prev.filter(l=>l.id!==id));}
@@ -331,15 +411,21 @@ export default function App(){
         if(existing){
           setLines(prev=>prev.map(l=>l.id===existing.id?{...l,...(parsed.volumeMl!=null&&{volumeMl:parsed.volumeMl}),...(parsed.timeMin!=null&&{timeMin:parsed.timeMin}),...(parsed.drug&&{drug:parsed.drug}),...(parsed.notes&&{notes:parsed.notes}),highlight:true}:l));
           clearHighlight();showStatus("✓ "+(parsed.summary||"Line updated"));
-        }else{addLine({...parsed,highlight:true});clearHighlight();showStatus("✓ Room not found — added as new line");}
-      }else{addLine({...parsed,highlight:true});clearHighlight();showStatus("✓ "+(parsed.summary||"Line added"));}
-      if(parsed.warning)setTimeout(()=>showStatus("⚠ "+parsed.warning,"warn"),600);
+          if(window.gtag) window.gtag('event','ai_parse',{action:'update'});
+        }else{addLine({...parsed,highlight:true},'ai');clearHighlight();showStatus("✓ Room not found — added as new line");}
+      }else{addLine({...parsed,highlight:true},'ai');clearHighlight();showStatus("✓ "+(parsed.summary||"Line added"));
+        if(window.gtag) window.gtag('event','ai_parse',{action:'add'});
+      }      if(parsed.warning)setTimeout(()=>showStatus("⚠ "+parsed.warning,"warn"),600);
       setInput("");
     }catch(e){showStatus("Could not parse — try rephrasing or add manually","error");}
     setLoading(false);
   }
 
-  function onVoiceTranscript(transcript){setInput(transcript);setTimeout(()=>submit(transcript),100);}
+  function onVoiceTranscript(transcript){
+    setInput(transcript);
+    if(window.gtag) window.gtag('event','ai_parse',{method:'voice'});
+    setTimeout(()=>submit(transcript),100);
+  }
 
   return(
     <div style={{background:COLORS.bg,minHeight:"100vh",backgroundImage:"linear-gradient(rgba(0,212,170,0.025) 1px,transparent 1px),linear-gradient(90deg,rgba(0,212,170,0.025) 1px,transparent 1px)",backgroundSize:"32px 32px"}}>
@@ -349,7 +435,7 @@ export default function App(){
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:28,paddingBottom:16,borderBottom:`1px solid ${COLORS.border}`}}>
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <div style={{width:38,height:38,background:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>💉</div>
-            <span style={{fontFamily:"IBM Plex Mono",fontSize:20,fontWeight:600,letterSpacing:-0.5}}>Drip<span style={{color:COLORS.accent}}>AI</span></span>
+            <span style={{fontFamily:"IBM Plex Mono",fontSize:20,fontWeight:600,letterSpacing:-0.5}}>Shift<span style={{color:COLORS.accent}}>Mate</span></span>
           </div>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,textAlign:"right"}}>
             <div style={{color:COLORS.accent,fontSize:14,fontWeight:600}}>{clock}</div>
@@ -407,7 +493,7 @@ export default function App(){
 
       {/* Floating Chat Button */}
       {!chatOpen&&(
-        <button onClick={()=>setChatOpen(true)}
+        <button onClick={()=>{setChatOpen(true);if(window.gtag)window.gtag('event','chat_opened');}}
           style={{position:"fixed",bottom:24,right:24,width:60,height:60,borderRadius:"50%",background:`linear-gradient(135deg,${COLORS.purple},${COLORS.blue})`,border:"none",boxShadow:"0 4px 20px rgba(168,85,247,0.4)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,zIndex:100,transition:"transform 0.2s"}}
           onMouseEnter={e=>e.target.style.transform="scale(1.1)"}
           onMouseLeave={e=>e.target.style.transform="scale(1)"}>
