@@ -213,23 +213,50 @@ function StatusBanner({status}){
 }
 
 // ─── Voice Button ─────────────────────────────────────────────────────────────
-function VoiceButton({onTranscript,disabled}){
+function VoiceButton({onTranscript,disabled,onStopAndParse}){
   const [listening,setListening]=useState(false);
   const recogRef=useRef(null);
+
+  function stopRecording(){
+    recogRef.current?.stop();
+    recogRef.current=null;
+    setListening(false);
+  }
+
   const toggle=useCallback(()=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
     if(!SR){alert("Voice input not supported. Try Chrome on Android or Safari on iOS.");return;}
-    if(listening){recogRef.current?.stop();setListening(false);return;}
+
+    if(listening){
+      // Second tap — stop and trigger parse
+      stopRecording();
+      onStopAndParse();
+      return;
+    }
+
     const r=new SR();
     r.lang="en-US";r.interimResults=false;r.maxAlternatives=1;
     recogRef.current=r;
-    r.onresult=e=>{onTranscript(e.results[0][0].transcript);setListening(false);};
-    r.onerror=()=>setListening(false);
-    r.onend=()=>setListening(false);
-    r.start();setListening(true);
-  },[listening,onTranscript]);
+
+    r.onresult=e=>{
+      const transcript=e.results[0][0].transcript;
+      setListening(false);
+      recogRef.current=null;
+      onTranscript(transcript);
+    };
+    r.onerror=()=>{setListening(false);recogRef.current=null;};
+    r.onend=()=>{setListening(false);recogRef.current=null;};
+    r.start();
+    setListening(true);
+  },[listening,onTranscript,onStopAndParse]);
+
+  // Expose stop method for parse button
+  useEffect(()=>{
+    if(!listening) return;
+  },[listening]);
+
   return(
-    <button onClick={toggle} disabled={disabled} title={listening?"Tap to stop":"Tap to speak"}
+    <button onClick={toggle} disabled={disabled} title={listening?"Tap to stop and parse":"Tap to speak"}
       style={{position:"relative",width:46,height:46,borderRadius:"50%",background:listening?"rgba(239,68,68,0.15)":COLORS.surface2,border:`1px solid ${listening?COLORS.danger:COLORS.border}`,color:listening?COLORS.danger:COLORS.muted,fontSize:18,cursor:disabled?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all 0.2s"}}>
       {listening&&<span style={{position:"absolute",inset:-4,borderRadius:"50%",border:`2px solid ${COLORS.danger}`,animation:"ripple 1.2s ease-out infinite",pointerEvents:"none"}}/>}
       {listening?"⏹":"🎤"}
@@ -280,6 +307,7 @@ export default function App(){
   const [clock,setClock]=useState("");
   const [chatOpen,setChatOpen]=useState(false);
   const [confirmClear,setConfirmClear]=useState(false);
+  const [voiceInput,setVoiceInput]=useState("");
   const [showDisclaimer,setShowDisclaimer]=useState(()=>{
     try{return !localStorage.getItem("shiftmate_disclaimer_accepted");}catch{return true;}
   });
@@ -352,7 +380,16 @@ export default function App(){
   function onVoiceTranscript(transcript){
     setInput(transcript);
     if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});
-    setTimeout(()=>submit(transcript),100);
+    submit(transcript);
+  }
+
+  function onStopAndParse(){
+    // Called when mic tapped second time — input already set by typing
+    // if input has text, parse it
+    if(input.trim()){
+      if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});
+      submit(input);
+    }
   }
 
   return(
@@ -378,11 +415,11 @@ export default function App(){
             AI Input — type or speak
           </div>
           <div style={{display:"flex",gap:10,alignItems:"center"}}>
-            <VoiceButton onTranscript={onVoiceTranscript} disabled={loading}/>
+            <VoiceButton onTranscript={onVoiceTranscript} onStopAndParse={onStopAndParse} disabled={loading}/>
             <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&!loading&&submit()}
               placeholder="e.g. add room 7 heparin 125ml over 60 min"
               style={{flex:1,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:8,padding:"12px 14px",color:COLORS.text,fontSize:14,fontFamily:"IBM Plex Sans",outline:"none"}}/>
-            <button onClick={()=>submit()} disabled={loading||!input.trim()}
+            <button onClick={()=>{submit();}}  disabled={loading||!input.trim()}
               style={{background:loading||!input.trim()?COLORS.surface2:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,border:"none",borderRadius:8,padding:"12px 18px",color:loading||!input.trim()?COLORS.muted:"#0a0f1a",fontFamily:"IBM Plex Mono",fontSize:12,fontWeight:600,cursor:loading||!input.trim()?"not-allowed":"pointer",whiteSpace:"nowrap",minWidth:72}}>
               {loading?"...":"Parse"}
             </button>
