@@ -6,7 +6,7 @@ const ID_KEY      = "dripaiv3_nextid";
 const COLORS = {
   bg:"#0a0f1a",surface:"#111827",surface2:"#1a2235",border:"#1f2d45",
   accent:"#00d4aa",blue:"#0ea5e9",warn:"#f59e0b",danger:"#ef4444",
-  text:"#e2e8f0",muted:"#64748b",purple:"#a855f7",
+  text:"#e2e8f0",muted:"#64748b",purple:"#a855f7",green:"#22c55e",
 };
 
 const STATUS_STYLES = {
@@ -31,30 +31,69 @@ Convert time: "1 hour"=60,"2 hours"=120,"30 minutes"=30,"half hour"=30,"90 min"=
 If instruction updates an existing line (words: change,update,adjust,switch,modify), set action="update".
 If adding new line, set action="add".
 Respond ONLY with valid compact JSON, no markdown, no explanation:
-{"action":"add|update","room":"string or null","drug":"string or null","volumeMl":number_or_null,"timeMin":number_or_null,"notes":"string or null","warning":"string or null","summary":"plain English one sentence"}`;
+{"action":"add|update","room":"string or null","drug":"string or null","volumeMl":number_or_null,"timeMin":number_or_null,"unit":"ml|mg|mcg|g or null","notes":"string or null","warning":"string or null","summary":"plain English one sentence"}`;
+
+const UNITS = ["mL","mg","mcg","g"];
 
 function calcMlHr(vol,min){if(!vol||!min||min<=0)return null;return(vol/min)*60;}
 function fmtTime(min){if(!min)return"—";if(min<60)return`${min}min`;const h=min/60;return h%1===0?`${h}hr`:`${h.toFixed(1)}hr`;}
+function fmtCountdown(secs){
+  if(secs<=0)return"00:00";
+  const m=Math.floor(secs/60);
+  const s=secs%60;
+  return`${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+}
 function loadLines(){try{const s=localStorage.getItem(STORAGE_KEY);return s?JSON.parse(s):[];}catch{return[];}}
 function loadNextId(){try{return parseInt(localStorage.getItem(ID_KEY)||"1");}catch{return 1;}}
 
 async function callAPI(messages,system,max_tokens=600){
-  const resp=await fetch("/api/parse",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({system,messages,max_tokens}),
-  });
+  const resp=await fetch("/api/parse",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({system,messages,max_tokens})});
   if(!resp.ok)throw new Error(`API ${resp.status}`);
   const data=await resp.json();
   return data.content.map(c=>c.text||"").join("").trim();
 }
-
 async function parseWithAI(text){
   const raw=await callAPI([{role:"user",content:text}],PARSE_SYSTEM,400);
   return JSON.parse(raw.replace(/```json|```/g,"").trim());
 }
 
-// ─── Install Prompt ───────────────────────────────────────────────────────────
+// ─── Push Notification helper ──────────────────────────────────────────────
+async function requestNotificationPermission(){
+  if(!("Notification" in window))return false;
+  if(Notification.permission==="granted")return true;
+  if(Notification.permission==="denied")return false;
+  const result=await Notification.requestPermission();
+  return result==="granted";
+}
+function sendNotification(title,body){
+  if(!("Notification" in window)||Notification.permission!=="granted")return;
+  new Notification(title,{body,icon:"/favicon.ico",badge:"/favicon.ico"});
+}
+
+// ─── Timer Hook ────────────────────────────────────────────────────────────
+function useLineTimer(line,onUpdate){
+  const intervalRef=useRef(null);
+
+  useEffect(()=>{
+    if(!line.timerRunning||!line.timerEndsAt)return;
+    intervalRef.current=setInterval(()=>{
+      const remaining=Math.max(0,Math.floor((line.timerEndsAt-Date.now())/1000));
+      // notify at 5 min warning
+      if(remaining===300){
+        sendNotification(`⚠️ Room ${line.room||"?"}`,`${line.drug||"IV"} — 5 minutes remaining`);
+      }
+      // notify at end
+      if(remaining===0){
+        sendNotification(`🔔 Room ${line.room||"?"}`,`${line.drug||"IV"} — infusion complete`);
+        onUpdate(line.id,"timerRunning",false);
+        clearInterval(intervalRef.current);
+      }
+    },1000);
+    return()=>clearInterval(intervalRef.current);
+  },[line.timerRunning,line.timerEndsAt]);
+}
+
+// ─── Install Prompt ────────────────────────────────────────────────────────
 function InstallPrompt({onDismiss}){
   return(
     <div style={{position:"fixed",bottom:0,left:0,right:0,zIndex:999,padding:"0 16px 16px",animation:"slideUp 0.4s ease"}}>
@@ -73,7 +112,7 @@ function InstallPrompt({onDismiss}){
           {[
             {icon:"1️⃣",text:<>Tap the <strong style={{color:COLORS.accent}}>Share</strong> button ⎙ at the bottom of Safari</>},
             {icon:"2️⃣",text:<>Scroll down and tap <strong style={{color:COLORS.accent}}>"Add to Home Screen"</strong></>},
-            {icon:"3️⃣",text:<>Tap <strong style={{color:COLORS.accent}}>"Add"</strong> — done! ShiftMate lives on your home screen</>},
+            {icon:"3️⃣",text:<>Tap <strong style={{color:COLORS.accent}}>"Add"</strong> — done!</>},
           ].map((s,i)=>(
             <div key={i} style={{display:"flex",alignItems:"flex-start",gap:10,background:COLORS.surface2,borderRadius:8,padding:"9px 12px"}}>
               <span style={{fontSize:16,flexShrink:0}}>{s.icon}</span>
@@ -89,7 +128,7 @@ function InstallPrompt({onDismiss}){
   );
 }
 
-// ─── Disclaimer Modal ─────────────────────────────────────────────────────────
+// ─── Disclaimer ────────────────────────────────────────────────────────────
 function DisclaimerModal({onAccept}){
   return(
     <div style={{position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,0.85)",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
@@ -116,20 +155,16 @@ function DisclaimerModal({onAccept}){
           <button onClick={onAccept} style={{width:"100%",marginTop:20,background:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,border:"none",borderRadius:10,padding:"14px",color:"#0a0f1a",fontFamily:"IBM Plex Mono",fontSize:13,fontWeight:700,cursor:"pointer"}}>
             I Understand — Continue to ShiftMate
           </button>
-          <div style={{textAlign:"center",marginTop:10,fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.muted}}>
-            This acknowledgment is saved on your device
-          </div>
+          <div style={{textAlign:"center",marginTop:10,fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.muted}}>This acknowledgment is saved on your device</div>
         </div>
       </div>
     </div>
   );
 }
 
-// ─── Chat Overlay ─────────────────────────────────────────────────────────────
+// ─── Chat Overlay ──────────────────────────────────────────────────────────
 function ChatOverlay({onClose}){
-  const [messages,setMessages]=useState([
-    {role:"assistant",content:"Hey — this is your safe space. No judgment here, ever.\n\nAsk me anything clinical: meds, drip protocols, drug safety, procedures. The question you can't ask out loud? Ask it here."}
-  ]);
+  const [messages,setMessages]=useState([{role:"assistant",content:"Hey — this is your safe space. No judgment here, ever.\n\nAsk me anything clinical: meds, drip protocols, drug safety, procedures. The question you can't ask out loud? Ask it here."}]);
   const [input,setInput]=useState("");
   const [loading,setLoading]=useState(false);
   const bottomRef=useRef();
@@ -139,18 +174,13 @@ function ChatOverlay({onClose}){
   useEffect(()=>{setTimeout(()=>inputRef.current?.focus(),100);},[]);
 
   async function send(){
-    const txt=input.trim();
-    if(!txt||loading)return;
+    const txt=input.trim();if(!txt||loading)return;
     const newMessages=[...messages,{role:"user",content:txt}];
-    setMessages(newMessages);
-    setInput("");
-    setLoading(true);
+    setMessages(newMessages);setInput("");setLoading(true);
     try{
       const reply=await callAPI(newMessages.map(m=>({role:m.role,content:m.content})),CHAT_SYSTEM,600);
       setMessages(prev=>[...prev,{role:"assistant",content:reply}]);
-    }catch(e){
-      setMessages(prev=>[...prev,{role:"assistant",content:"Sorry, couldn't connect. Check your internet and try again."}]);
-    }
+    }catch(e){setMessages(prev=>[...prev,{role:"assistant",content:"Sorry, couldn't connect. Check your internet and try again."}]);}
     setLoading(false);
   }
 
@@ -193,9 +223,7 @@ function ChatOverlay({onClose}){
             rows={2}
             style={{flex:1,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:8,padding:"10px 12px",color:COLORS.text,fontSize:14,fontFamily:"IBM Plex Sans",resize:"none",outline:"none",lineHeight:1.5}}/>
           <button onClick={send} disabled={loading||!input.trim()}
-            style={{background:loading||!input.trim()?COLORS.surface2:`linear-gradient(135deg,${COLORS.purple},${COLORS.blue})`,border:"none",borderRadius:8,padding:"10px 16px",color:loading||!input.trim()?COLORS.muted:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12,fontWeight:600,cursor:loading||!input.trim()?"not-allowed":"pointer",whiteSpace:"nowrap",height:44}}>
-            Send
-          </button>
+            style={{background:loading||!input.trim()?COLORS.surface2:`linear-gradient(135deg,${COLORS.purple},${COLORS.blue})`,border:"none",borderRadius:8,padding:"10px 16px",color:loading||!input.trim()?COLORS.muted:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12,fontWeight:600,cursor:loading||!input.trim()?"not-allowed":"pointer",whiteSpace:"nowrap",height:44}}>Send</button>
         </div>
         <div style={{fontSize:10,color:COLORS.muted,marginTop:6,fontFamily:"IBM Plex Mono",textAlign:"center"}}>
           Always verify with your facility's protocols • Not a replacement for clinical judgment
@@ -205,56 +233,28 @@ function ChatOverlay({onClose}){
   );
 }
 
-// ─── Status Banner ────────────────────────────────────────────────────────────
+// ─── Status Banner ─────────────────────────────────────────────────────────
 function StatusBanner({status}){
   if(!status)return null;
   const s=STATUS_STYLES[status.type];
   return <div style={{marginTop:10,padding:"9px 13px",borderRadius:8,background:s.bg,color:s.color,border:`1px solid ${s.border}`,fontFamily:"IBM Plex Mono",fontSize:12}}>{status.msg}</div>;
 }
 
-// ─── Voice Button ─────────────────────────────────────────────────────────────
+// ─── Voice Button ──────────────────────────────────────────────────────────
 function VoiceButton({onTranscript,disabled,onStopAndParse}){
   const [listening,setListening]=useState(false);
   const recogRef=useRef(null);
-
-  function stopRecording(){
-    recogRef.current?.stop();
-    recogRef.current=null;
-    setListening(false);
-  }
-
+  function stopRecording(){recogRef.current?.stop();recogRef.current=null;setListening(false);}
   const toggle=useCallback(()=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
     if(!SR){alert("Voice input not supported. Try Chrome on Android or Safari on iOS.");return;}
-
-    if(listening){
-      // Second tap — stop and trigger parse
-      stopRecording();
-      onStopAndParse();
-      return;
-    }
-
-    const r=new SR();
-    r.lang="en-US";r.interimResults=false;r.maxAlternatives=1;
-    recogRef.current=r;
-
-    r.onresult=e=>{
-      const transcript=e.results[0][0].transcript;
-      setListening(false);
-      recogRef.current=null;
-      onTranscript(transcript);
-    };
+    if(listening){stopRecording();onStopAndParse();return;}
+    const r=new SR();r.lang="en-US";r.interimResults=false;r.maxAlternatives=1;recogRef.current=r;
+    r.onresult=e=>{const t=e.results[0][0].transcript;setListening(false);recogRef.current=null;onTranscript(t);};
     r.onerror=()=>{setListening(false);recogRef.current=null;};
     r.onend=()=>{setListening(false);recogRef.current=null;};
-    r.start();
-    setListening(true);
+    r.start();setListening(true);
   },[listening,onTranscript,onStopAndParse]);
-
-  // Expose stop method for parse button
-  useEffect(()=>{
-    if(!listening) return;
-  },[listening]);
-
   return(
     <button onClick={toggle} disabled={disabled} title={listening?"Tap to stop and parse":"Tap to speak"}
       style={{position:"relative",width:46,height:46,borderRadius:"50%",background:listening?"rgba(239,68,68,0.15)":COLORS.surface2,border:`1px solid ${listening?COLORS.danger:COLORS.border}`,color:listening?COLORS.danger:COLORS.muted,fontSize:18,cursor:disabled?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all 0.2s"}}>
@@ -264,40 +264,284 @@ function VoiceButton({onTranscript,disabled,onStopAndParse}){
   );
 }
 
-// ─── Line Card ────────────────────────────────────────────────────────────────
-function LineCard({line,onUpdate,onRemove}){
-  const rate=calcMlHr(line.volumeMl,line.timeMin);
-  const flagged=rate&&rate>500;
+// ─── Line Timer Display ────────────────────────────────────────────────────
+function LineTimer({line,onUpdate}){
+  const isBolus=line.isBolus||false;
+
+  // For bolus: track remaining seconds (count down)
+  // For continuous: track elapsed seconds (count up)
+  const [remaining,setRemaining]=useState(()=>{
+    if(!line.timerEndsAt)return line.timeMin?line.timeMin*60:0;
+    return Math.max(0,Math.floor((line.timerEndsAt-Date.now())/1000));
+  });
+  const [elapsed,setElapsed]=useState(()=>{
+    if(!line.timerStartedAt)return 0;
+    if(!line.timerRunning)return line.timerElapsed||0;
+    return Math.floor((Date.now()-line.timerStartedAt)/1000)+(line.timerElapsed||0);
+  });
+  const intervalRef=useRef(null);
+
+  useEffect(()=>{
+    clearInterval(intervalRef.current);
+    if(!line.timerRunning)return;
+
+    if(isBolus){
+      // Count down
+      intervalRef.current=setInterval(()=>{
+        const r=Math.max(0,Math.floor((line.timerEndsAt-Date.now())/1000));
+        setRemaining(r);
+        if(r===300){sendNotification(`⚠️ Room ${line.room||"?"}`,`${line.drug||"IV line"} — 5 minutes remaining`);}
+        if(r===0){
+          sendNotification(`🔔 Room ${line.room||"?"}`,`${line.drug||"IV line"} — bolus complete`);
+          onUpdate(line.id,"timerRunning",false);
+          setTimeout(()=>onUpdate(line.id,"timerEndsAt",null),3000);
+          clearInterval(intervalRef.current);
+        }
+      },1000);
+    } else {
+      // Count up
+      intervalRef.current=setInterval(()=>{
+        const e=Math.floor((Date.now()-line.timerStartedAt)/1000)+(line.timerElapsed||0);
+        setElapsed(e);
+      },1000);
+    }
+    return()=>clearInterval(intervalRef.current);
+  },[line.timerRunning,line.timerEndsAt,line.timerStartedAt,isBolus]);
+
+  // sync remaining when timeMin changes
+  useEffect(()=>{
+    if(!line.timerRunning&&line.timeMin)setRemaining(line.timeMin*60);
+  },[line.timeMin,line.timerRunning]);
+
+  // Bolus progress bar
+  const totalSecs=line.timeMin?(line.timeMin*60):0;
+  const bolusRemaining=line.timerEndsAt?Math.max(0,Math.floor((line.timerEndsAt-Date.now())/1000)):remaining;
+  const bolusPct=totalSecs>0?Math.round((bolusRemaining/totalSecs)*100):0;
+  const isBolusLow=isBolus&&bolusRemaining>0&&bolusRemaining<=300;
+  const isBolusDone=isBolus&&bolusRemaining===0&&line.timerEndsAt;
+  const bolusBarColor=isBolusDone?COLORS.danger:isBolusLow?COLORS.warn:COLORS.warn;
+
+  // Continuous elapsed display
+  function fmtElapsed(secs){
+    const h=Math.floor(secs/3600);
+    const m=Math.floor((secs%3600)/60);
+    const s=secs%60;
+    if(h>0)return`${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+    return`${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+  }
+
+  function handleStart(){
+    requestNotificationPermission();
+    if(isBolus){
+      const endsAt=Date.now()+(remaining*1000);
+      onUpdate(line.id,"timerEndsAt",endsAt);
+    } else {
+      onUpdate(line.id,"timerStartedAt",Date.now());
+    }
+    onUpdate(line.id,"timerRunning",true);
+    if(window.gtag)window.gtag('event','timer_started',{type:isBolus?'bolus':'continuous'});
+  }
+
+  function handleStop(){
+    if(!isBolus){
+      // save elapsed so far before pausing
+      const currentElapsed=Math.floor((Date.now()-line.timerStartedAt)/1000)+(line.timerElapsed||0);
+      onUpdate(line.id,"timerElapsed",currentElapsed);
+      setElapsed(currentElapsed);
+    }
+    onUpdate(line.id,"timerRunning",false);
+  }
+
+  function handleReset(){
+    onUpdate(line.id,"timerRunning",false);
+    onUpdate(line.id,"timerEndsAt",null);
+    onUpdate(line.id,"timerStartedAt",null);
+    onUpdate(line.id,"timerElapsed",0);
+    setRemaining(line.timeMin?line.timeMin*60:0);
+    setElapsed(0);
+  }
+
+  if(!line.timeMin&&!isBolus&&!line.timerRunning&&elapsed===0)return null;
+  if(!line.timeMin&&isBolus)return null;
+
   return(
-    <div style={{background:COLORS.surface,border:`1px solid ${line.highlight?COLORS.accent:flagged?COLORS.warn:COLORS.border}`,borderRadius:12,padding:16,boxShadow:line.highlight?"0 0 16px rgba(0,212,170,0.13)":"none",transition:"border-color 0.4s, box-shadow 0.4s"}}>
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
-        <div style={{background:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,color:"#0a0f1a",fontFamily:"IBM Plex Mono",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:5,whiteSpace:"nowrap"}}>RM {line.room||"?"}</div>
-        <div style={{flex:1,fontSize:14,fontWeight:500,color:line.drug?COLORS.text:COLORS.muted}}>{line.drug||"No drug entered"}</div>
-        <button onClick={()=>onRemove(line.id)} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"4px 9px",color:COLORS.muted,cursor:"pointer",fontSize:12}}>✕</button>
-      </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8,marginBottom:12}}>
-        {[{label:"Room",field:"room",placeholder:"4A",type:"text"},{label:"Drug / Fluid",field:"drug",placeholder:"Heparin",type:"text"},{label:"Volume (mL)",field:"volumeMl",placeholder:"100",type:"number"},{label:"Over (min)",field:"timeMin",placeholder:"60",type:"number"},{label:"Notes",field:"notes",placeholder:"optional",type:"text"}].map(f=>(
-          <div key={f.field}>
-            <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>{f.label}</div>
-            <input type={f.type} value={line[f.field]||""} placeholder={f.placeholder}
-              onChange={e=>onUpdate(line.id,f.field,f.type==="number"?(parseFloat(e.target.value)||""):e.target.value)}
-              style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 9px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
-          </div>
-        ))}
-      </div>
-      <div style={{background:COLORS.surface2,borderRadius:8,padding:"11px 14px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <div>
-          <span style={{fontFamily:"IBM Plex Mono",fontSize:24,fontWeight:700,color:COLORS.accent}}>{rate?rate.toFixed(1):"—"}</span>
-          <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>mL/hr</span>
-          <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginTop:2}}>{line.volumeMl||"—"}mL over {fmtTime(line.timeMin)}</div>
+    <div style={{marginTop:10,background:COLORS.surface2,borderRadius:8,padding:"10px 12px"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+        <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:isBolus?COLORS.warn:COLORS.accent}}>
+          {isBolus?"Bolus Timer":"Running Time"}
         </div>
-        {flagged&&<div style={{background:"rgba(245,158,11,0.12)",color:COLORS.warn,border:"1px solid rgba(245,158,11,0.3)",fontFamily:"IBM Plex Mono",fontSize:10,padding:"4px 9px",borderRadius:5}}>⚠ Verify rate</div>}
+        <div style={{display:"flex",gap:6}}>
+          {!line.timerRunning&&!isBolusDone&&(
+            <button onClick={handleStart} style={{background:isBolus?"rgba(245,158,11,0.1)":"rgba(0,212,170,0.1)",border:`1px solid ${isBolus?COLORS.warn:COLORS.accent}`,borderRadius:5,padding:"3px 10px",color:isBolus?COLORS.warn:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer",fontWeight:600}}>
+              ▶ {elapsed>0?"Resume":"Start"}
+            </button>
+          )}
+          {line.timerRunning&&(
+            <button onClick={handleStop} style={{background:"rgba(245,158,11,0.1)",border:`1px solid ${COLORS.warn}`,borderRadius:5,padding:"3px 10px",color:COLORS.warn,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer",fontWeight:600}}>⏸ Pause</button>
+          )}
+          {(line.timerRunning||elapsed>0||line.timerEndsAt||isBolusDone)&&(
+            <button onClick={handleReset} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:5,padding:"3px 10px",color:COLORS.muted,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer"}}>↺ Reset</button>
+          )}
+        </div>
+      </div>
+
+      {/* Bolus: progress bar counting down */}
+      {isBolus&&(
+        <div style={{background:COLORS.border,borderRadius:4,height:4,marginBottom:8,overflow:"hidden"}}>
+          <div style={{height:"100%",width:`${bolusPct}%`,background:bolusBarColor,borderRadius:4,transition:"width 1s linear",boxShadow:line.timerRunning?`0 0 6px ${bolusBarColor}`:"none"}}/>
+        </div>
+      )}
+
+      {/* Continuous: thin growing bar */}
+      {!isBolus&&line.timerRunning&&(
+        <div style={{background:COLORS.border,borderRadius:4,height:3,marginBottom:8,overflow:"hidden"}}>
+          <div style={{height:"100%",width:"100%",background:`linear-gradient(90deg,${COLORS.accent},${COLORS.blue})`,borderRadius:4,animation:"scan 2s linear infinite",opacity:0.6}}/>
+        </div>
+      )}
+
+      {/* Time display */}
+      <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+        {isBolus?(
+          <>
+            <span style={{fontFamily:"IBM Plex Mono",fontSize:22,fontWeight:700,color:isBolusDone?COLORS.danger:isBolusLow?COLORS.warn:COLORS.text}}>
+              {isBolusDone?"DONE":fmtCountdown(bolusRemaining)}
+            </span>
+            {!isBolusDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted}}>remaining of {fmtTime(line.timeMin)}</span>}
+            {isBolusDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.danger}}>bolus complete</span>}
+            {isBolusLow&&!isBolusDone&&line.timerRunning&&(
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.warn,marginLeft:"auto",animation:"pulse 1s ease-in-out infinite"}}>⚠ ending soon</span>
+            )}
+          </>
+        ):(
+          <>
+            <span style={{fontFamily:"IBM Plex Mono",fontSize:22,fontWeight:700,color:COLORS.accent}}>
+              {fmtElapsed(elapsed)}
+            </span>
+            <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted}}>
+              {line.timerRunning?"elapsed":"paused"}
+            </span>
+          </>
+        )}
       </div>
     </div>
   );
 }
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
+// ─── Line Card ─────────────────────────────────────────────────────────────
+function LineCard({line,onUpdate,onRemove}){
+  const rate=calcMlHr(line.volumeMl,line.timeMin);
+  const flagged=rate&&rate>500;
+
+  return(
+    <div style={{background:COLORS.surface,border:`1px solid ${line.highlight?COLORS.accent:line.isBolus?COLORS.warn:flagged?COLORS.warn:line.timerRunning?COLORS.green:COLORS.border}`,borderRadius:12,padding:16,boxShadow:line.highlight?"0 0 16px rgba(0,212,170,0.13)":line.isBolus?"0 0 10px rgba(245,158,11,0.07)":line.timerRunning?"0 0 12px rgba(34,197,94,0.1)":"none",transition:"border-color 0.4s, box-shadow 0.4s"}}>
+
+      {/* Top row */}
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+        <div style={{background:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,color:"#0a0f1a",fontFamily:"IBM Plex Mono",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:5,whiteSpace:"nowrap"}}>RM {line.room||"?"}</div>
+        <div style={{flex:1,fontSize:14,fontWeight:500,color:line.drug?COLORS.text:COLORS.muted}}>{line.drug||"No drug entered"}</div>
+        {line.timerRunning&&<span style={{fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.green,animation:"pulse 2s ease-in-out infinite"}}>● RUNNING</span>}
+
+        {/* CONT / BOLUS toggle */}
+        <button
+          onClick={()=>onUpdate(line.id,"isBolus",!line.isBolus)}
+          title={line.isBolus?"Switch to continuous infusion":"Switch to bolus"}
+          style={{
+            background:line.isBolus?"rgba(245,158,11,0.12)":"rgba(0,212,170,0.08)",
+            border:`1px solid ${line.isBolus?COLORS.warn:COLORS.accent}`,
+            borderRadius:20,
+            padding:"3px 10px",
+            color:line.isBolus?COLORS.warn:COLORS.accent,
+            fontFamily:"IBM Plex Mono",
+            fontSize:10,
+            fontWeight:700,
+            cursor:"pointer",
+            letterSpacing:0.5,
+            whiteSpace:"nowrap",
+            transition:"all 0.2s",
+          }}>
+          {line.isBolus?"BOLUS":"CONT"}
+        </button>
+
+        <button onClick={()=>onRemove(line.id)} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"4px 9px",color:COLORS.muted,cursor:"pointer",fontSize:12}}>✕</button>
+      </div>
+
+      {/* Fields */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",gap:8,marginBottom:12}}>
+        {/* Room */}
+        <div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Room</div>
+          <input type="text" value={line.room||""} placeholder="4A"
+            onChange={e=>onUpdate(line.id,"room",e.target.value)}
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 9px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+        </div>
+        {/* Drug */}
+        <div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Drug</div>
+          <input type="text" value={line.drug||""} placeholder="Heparin"
+            onChange={e=>onUpdate(line.id,"drug",e.target.value)}
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 9px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+        </div>
+        {/* Volume + Unit */}
+        <div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Amount</div>
+          <div style={{display:"flex",gap:4}}>
+            <input type="number" value={line.volumeMl||""} placeholder="100"
+              onChange={e=>onUpdate(line.id,"volumeMl",parseFloat(e.target.value)||"")}
+              style={{flex:1,minWidth:0,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 6px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+            <select value={line.unit||"mL"}
+              onChange={e=>onUpdate(line.id,"unit",e.target.value)}
+              style={{background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 4px",color:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:11,cursor:"pointer",flexShrink:0}}>
+              {UNITS.map(u=><option key={u} value={u}>{u}</option>)}
+            </select>
+          </div>
+        </div>
+        {/* Time */}
+        <div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Over (min)</div>
+          <input type="number" value={line.timeMin||""} placeholder="60"
+            onChange={e=>onUpdate(line.id,"timeMin",parseFloat(e.target.value)||"")}
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 9px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+        </div>
+        {/* Notes */}
+        <div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Notes</div>
+          <input type="text" value={line.notes||""} placeholder="optional"
+            onChange={e=>onUpdate(line.id,"notes",e.target.value)}
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 9px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+        </div>
+      </div>
+
+      {/* Result */}
+      <div style={{background:COLORS.surface2,borderRadius:8,padding:"11px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:line.timeMin?8:0}}>
+        <div>
+          {line.isBolus?(
+            <>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:24,fontWeight:700,color:COLORS.warn}}>{line.volumeMl||"—"}</span>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>{line.unit||"mL"} bolus</span>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginTop:2}}>
+                {rate?`over ${fmtTime(line.timeMin)} (${rate.toFixed(1)} ${line.unit||"mL"}/hr)`:`over ${fmtTime(line.timeMin)}`}
+              </div>
+            </>
+          ):(
+            <>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:24,fontWeight:700,color:COLORS.accent}}>{rate?rate.toFixed(1):"—"}</span>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>{line.unit||"mL"}/hr</span>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginTop:2}}>{line.volumeMl||"—"}{line.unit||"mL"} over {fmtTime(line.timeMin)}</div>
+            </>
+          )}
+        </div>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:4}}>
+          {flagged&&!line.isBolus&&<div style={{background:"rgba(245,158,11,0.12)",color:COLORS.warn,border:"1px solid rgba(245,158,11,0.3)",fontFamily:"IBM Plex Mono",fontSize:10,padding:"3px 8px",borderRadius:5}}>⚠ Verify rate</div>}
+        </div>
+      </div>
+
+      {/* Timer */}
+      <LineTimer line={line} onUpdate={onUpdate}/>
+    </div>
+  );
+}
+
+// ─── Main App ──────────────────────────────────────────────────────────────
 export default function App(){
   const [lines,setLines]=useState(loadLines);
   const [nextId,setNextId]=useState(loadNextId);
@@ -307,10 +551,7 @@ export default function App(){
   const [clock,setClock]=useState("");
   const [chatOpen,setChatOpen]=useState(false);
   const [confirmClear,setConfirmClear]=useState(false);
-  const [voiceInput,setVoiceInput]=useState("");
-  const [showDisclaimer,setShowDisclaimer]=useState(()=>{
-    try{return !localStorage.getItem("shiftmate_disclaimer_accepted");}catch{return true;}
-  });
+  const [showDisclaimer,setShowDisclaimer]=useState(()=>{try{return !localStorage.getItem("shiftmate_disclaimer_accepted");}catch{return true;}});
   const [showInstall,setShowInstall]=useState(()=>{
     try{
       const isIOS=/iphone|ipad|ipod/i.test(navigator.userAgent);
@@ -331,25 +572,24 @@ export default function App(){
   },[lines,nextId]);
 
   function showStatus(msg,type="success"){setStatus({msg,type});setTimeout(()=>setStatus(null),4500);}
-
-  function acceptDisclaimer(){
-    try{localStorage.setItem("shiftmate_disclaimer_accepted","true");}catch{}
-    setShowDisclaimer(false);
-    if(window.gtag)window.gtag('event','disclaimer_accepted');
-  }
-
-  function dismissInstall(){
-    try{localStorage.setItem('shiftmate_install_dismissed','true');}catch{}
-    setShowInstall(false);
-  }
+  function acceptDisclaimer(){try{localStorage.setItem("shiftmate_disclaimer_accepted","true");}catch{}setShowDisclaimer(false);if(window.gtag)window.gtag('event','disclaimer_accepted');}
+  function dismissInstall(){try{localStorage.setItem('shiftmate_install_dismissed','true');}catch{}setShowInstall(false);}
 
   function addLine(data={},source="manual"){
-    setLines(prev=>[...prev,{id:nextId,room:data.room||"",drug:data.drug||"",volumeMl:data.volumeMl||"",timeMin:data.timeMin||"",notes:data.notes||"",highlight:data.highlight||false}]);
+    setLines(prev=>[...prev,{id:nextId,room:data.room||"",drug:data.drug||"",volumeMl:data.volumeMl||"",timeMin:data.timeMin||"",unit:data.unit||"mL",notes:data.notes||"",highlight:data.highlight||false,timerRunning:false,timerEndsAt:null,isBolus:data.isBolus||false}]);
     setNextId(n=>n+1);
     if(window.gtag)window.gtag('event','line_added',{source});
   }
 
-  function updateLine(id,field,value){setLines(prev=>prev.map(l=>l.id===id?{...l,[field]:value}:l));}
+  function updateLine(id,field,value){
+    setLines(prev=>prev.map(l=>{
+      if(l.id!==id)return l;
+      const updated={...l,[field]:value};
+      // if timeMin changes and timer is running, reset timer
+      if(field==="timeMin"&&l.timerRunning){updated.timerRunning=false;updated.timerEndsAt=null;}
+      return updated;
+    }));
+  }
   function removeLine(id){setLines(prev=>prev.filter(l=>l.id!==id));}
   function clearAll(){if(!lines.length)return;setConfirmClear(true);}
   function clearHighlight(){setTimeout(()=>setLines(prev=>prev.map(l=>({...l,highlight:false}))),1600);}
@@ -363,7 +603,7 @@ export default function App(){
       if(parsed.action==="update"&&parsed.room){
         const existing=lines.find(l=>l.room&&norm(l.room)===norm(parsed.room));
         if(existing){
-          setLines(prev=>prev.map(l=>l.id===existing.id?{...l,...(parsed.volumeMl!=null&&{volumeMl:parsed.volumeMl}),...(parsed.timeMin!=null&&{timeMin:parsed.timeMin}),...(parsed.drug&&{drug:parsed.drug}),...(parsed.notes&&{notes:parsed.notes}),highlight:true}:l));
+          setLines(prev=>prev.map(l=>l.id===existing.id?{...l,...(parsed.volumeMl!=null&&{volumeMl:parsed.volumeMl}),...(parsed.timeMin!=null&&{timeMin:parsed.timeMin}),...(parsed.drug&&{drug:parsed.drug}),...(parsed.unit&&{unit:parsed.unit}),...(parsed.notes&&{notes:parsed.notes}),highlight:true}:l));
           clearHighlight();showStatus("✓ "+(parsed.summary||"Line updated"));
           if(window.gtag)window.gtag('event','ai_parse',{action:'update'});
         }else{addLine({...parsed,highlight:true},'ai');clearHighlight();showStatus("✓ Room not found — added as new line");}
@@ -377,20 +617,8 @@ export default function App(){
     setLoading(false);
   }
 
-  function onVoiceTranscript(transcript){
-    setInput(transcript);
-    if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});
-    submit(transcript);
-  }
-
-  function onStopAndParse(){
-    // Called when mic tapped second time — input already set by typing
-    // if input has text, parse it
-    if(input.trim()){
-      if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});
-      submit(input);
-    }
-  }
+  function onVoiceTranscript(transcript){setInput(transcript);if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});submit(transcript);}
+  function onStopAndParse(){if(input.trim()){if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});submit(input);}}
 
   return(
     <div style={{background:COLORS.bg,minHeight:"100vh",backgroundImage:"linear-gradient(rgba(0,212,170,0.025) 1px,transparent 1px),linear-gradient(90deg,rgba(0,212,170,0.025) 1px,transparent 1px)",backgroundSize:"32px 32px"}}>
@@ -419,13 +647,13 @@ export default function App(){
             <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&!loading&&submit()}
               placeholder="e.g. add room 7 heparin 125ml over 60 min"
               style={{flex:1,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:8,padding:"12px 14px",color:COLORS.text,fontSize:14,fontFamily:"IBM Plex Sans",outline:"none"}}/>
-            <button onClick={()=>{submit();}}  disabled={loading||!input.trim()}
+            <button onClick={()=>submit()} disabled={loading||!input.trim()}
               style={{background:loading||!input.trim()?COLORS.surface2:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,border:"none",borderRadius:8,padding:"12px 18px",color:loading||!input.trim()?COLORS.muted:"#0a0f1a",fontFamily:"IBM Plex Mono",fontSize:12,fontWeight:600,cursor:loading||!input.trim()?"not-allowed":"pointer",whiteSpace:"nowrap",minWidth:72}}>
               {loading?"...":"Parse"}
             </button>
           </div>
           <div style={{fontSize:11,color:COLORS.muted,marginTop:8,fontStyle:"italic"}}>
-            Try: <span style={{color:COLORS.blue,fontStyle:"normal"}}>"change room 4 dopamine from 100ml over 60 min to 90 min"</span>
+            Try: <span style={{color:COLORS.blue,fontStyle:"normal"}}>"add room 7 heparin 125mg over 60 min"</span>
           </div>
           <StatusBanner status={status}/>
         </div>
@@ -439,7 +667,7 @@ export default function App(){
           </div>
         </div>
 
-        {/* Lines list */}
+        {/* Lines */}
         {lines.length===0?(
           <div style={{textAlign:"center",padding:"52px 24px",color:COLORS.muted}}>
             <div style={{fontSize:42,marginBottom:12,opacity:0.35}}>💊</div>
@@ -456,7 +684,7 @@ export default function App(){
       {/* Install Prompt */}
       {showInstall&&!showDisclaimer&&<InstallPrompt onDismiss={dismissInstall}/>}
 
-      {/* Confirm Clear Modal */}
+      {/* Confirm Clear */}
       {confirmClear&&(
         <div style={{position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,0.7)",display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
           <div style={{background:COLORS.surface,border:`1px solid ${COLORS.border}`,borderRadius:16,padding:24,maxWidth:320,width:"100%",textAlign:"center"}}>
@@ -474,7 +702,7 @@ export default function App(){
       {/* Disclaimer */}
       {showDisclaimer&&<DisclaimerModal onAccept={acceptDisclaimer}/>}
 
-      {/* Floating Chat Button */}
+      {/* Floating Chat */}
       {!chatOpen&&(
         <>
           <button onClick={()=>{setChatOpen(true);if(window.gtag)window.gtag('event','chat_opened');}}
@@ -486,8 +714,6 @@ export default function App(){
           </div>
         </>
       )}
-
-      {/* Chat */}
       {chatOpen&&<ChatOverlay onClose={()=>setChatOpen(false)}/>}
 
       <style>{`
@@ -495,9 +721,10 @@ export default function App(){
         @keyframes ripple{0%{transform:scale(1);opacity:0.6}100%{transform:scale(2.2);opacity:0}}
         @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
         @keyframes slideUp{from{opacity:0;transform:translateY(40px)}to{opacity:1;transform:translateY(0)}}
-        input:focus,textarea:focus{outline:none;border-color:#0ea5e9!important}
+        input:focus,textarea:focus,select:focus{outline:none;border-color:#0ea5e9!important}
         input::placeholder,textarea::placeholder{color:#374151}
         input[type=number]::-webkit-inner-spin-button{opacity:0.3}
+        select option{background:#1a2235;color:#e2e8f0;}
         ::-webkit-scrollbar{width:4px}
         ::-webkit-scrollbar-track{background:transparent}
         ::-webkit-scrollbar-thumb{background:#1f2d45;border-radius:2px}
