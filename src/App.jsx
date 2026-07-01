@@ -244,17 +244,47 @@ function StatusBanner({status}){
 function VoiceButton({onTranscript,disabled,onStopAndParse}){
   const [listening,setListening]=useState(false);
   const recogRef=useRef(null);
-  function stopRecording(){recogRef.current?.stop();recogRef.current=null;setListening(false);}
+  const pendingStopRef=useRef(false);
+
   const toggle=useCallback(()=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
     if(!SR){alert("Voice input not supported. Try Chrome on Android or Safari on iOS.");return;}
-    if(listening){stopRecording();onStopAndParse();return;}
-    const r=new SR();r.lang="en-US";r.interimResults=false;r.maxAlternatives=1;recogRef.current=r;
-    r.onresult=e=>{const t=e.results[0][0].transcript;setListening(false);recogRef.current=null;onTranscript(t);};
-    r.onerror=()=>{setListening(false);recogRef.current=null;};
-    r.onend=()=>{setListening(false);recogRef.current=null;};
-    r.start();setListening(true);
+
+    if(listening){
+      // Mark that we want to parse when the result comes in
+      pendingStopRef.current=true;
+      recogRef.current?.stop();
+      setListening(false);
+      return;
+    }
+
+    const r=new SR();
+    r.lang="en-US";r.interimResults=false;r.maxAlternatives=1;
+    recogRef.current=r;
+
+    r.onresult=e=>{
+      const transcript=e.results[0][0].transcript;
+      setListening(false);
+      recogRef.current=null;
+      // Always pass transcript up — whether user tapped stop or it ended naturally
+      onTranscript(transcript);
+      pendingStopRef.current=false;
+    };
+    r.onerror=()=>{setListening(false);recogRef.current=null;pendingStopRef.current=false;};
+    r.onend=()=>{
+      setListening(false);
+      recogRef.current=null;
+      // If stopped manually but no result came (silence), call onStopAndParse with whatever input exists
+      if(pendingStopRef.current){
+        pendingStopRef.current=false;
+        onStopAndParse();
+      }
+    };
+    r.start();
+    setListening(true);
+    pendingStopRef.current=false;
   },[listening,onTranscript,onStopAndParse]);
+
   return(
     <button onClick={toggle} disabled={disabled} title={listening?"Tap to stop and parse":"Tap to speak"}
       style={{position:"relative",width:46,height:46,borderRadius:"50%",background:listening?"rgba(239,68,68,0.15)":COLORS.surface2,border:`1px solid ${listening?COLORS.danger:COLORS.border}`,color:listening?COLORS.danger:COLORS.muted,fontSize:18,cursor:disabled?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all 0.2s"}}>
@@ -566,48 +596,66 @@ function LineCard({line,onUpdate,onRemove}){
         <button onClick={()=>onRemove(line.id)} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"4px 9px",color:COLORS.muted,cursor:"pointer",fontSize:12}}>✕</button>
       </div>
 
-      {/* Fields — 2 col on mobile, 3 col on wider screens */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(2, 1fr)",gap:10,marginBottom:12}}>
-        {/* Row 1: Room + Drug */}
-        <div>
+      {/* Fields */}
+      {/* Row 1: Room | Drug | Volume (mL) — all on one line */}
+      <div style={{display:"flex",gap:8,marginBottom:8,alignItems:"flex-end"}}>
+        {/* Room — compact */}
+        <div style={{width:72,flexShrink:0}}>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Room</div>
           <input type="text" value={line.room||""} placeholder="4A"
             onChange={e=>onUpdate(line.id,"room",e.target.value)}
-            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 10px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 8px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
         </div>
-        <div>
+        {/* Drug — flex fills space */}
+        <div style={{flex:1,minWidth:0}}>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Drug / Fluid</div>
-          <input type="text" value={line.drug||""} placeholder="Heparin"
+          <input type="text" value={line.drug||""} placeholder="e.g. Heparin"
             onChange={e=>onUpdate(line.id,"drug",e.target.value)}
             style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 10px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
         </div>
-        {/* Row 2: Amount + Time */}
-        <div>
-          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Amount</div>
-          <div style={{display:"flex",gap:6}}>
-            <input type="number" value={line.volumeMl||""} placeholder="100"
-              onChange={e=>onUpdate(line.id,"volumeMl",parseFloat(e.target.value)||"")}
-              style={{flex:1,minWidth:0,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 8px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
-            <select value={line.unit||"mL"}
-              onChange={e=>onUpdate(line.id,"unit",e.target.value)}
-              style={{background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 6px",color:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:12,cursor:"pointer",flexShrink:0}}>
-              {UNITS.map(u=><option key={u} value={u}>{u}</option>)}
-            </select>
-          </div>
+        {/* Volume — fixed width, always mL */}
+        <div style={{width:90,flexShrink:0}}>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Volume (mL)</div>
+          <input type="number" value={line.volumeMl||""} placeholder="250"
+            onChange={e=>onUpdate(line.id,"volumeMl",parseFloat(e.target.value)||"")}
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 8px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
         </div>
-        <div>
+      </div>
+
+      {/* Row 2: Time | Concentration */}
+      <div style={{display:"flex",gap:8,marginBottom:8,alignItems:"flex-end"}}>
+        {/* Over (min) */}
+        <div style={{width:100,flexShrink:0}}>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Over (min)</div>
           <input type="number" value={line.timeMin||""} placeholder="60"
             onChange={e=>onUpdate(line.id,"timeMin",parseFloat(e.target.value)||"")}
-            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 10px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 8px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
         </div>
-        {/* Row 3: Notes full width */}
-        <div style={{gridColumn:"1 / -1"}}>
-          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Notes</div>
-          <input type="text" value={line.notes||""} placeholder="optional"
-            onChange={e=>onUpdate(line.id,"notes",e.target.value)}
-            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 10px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
+        {/* Concentration — dose amount + unit dropdown */}
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>
+            Concentration <span style={{color:COLORS.border,letterSpacing:0}}>(optional)</span>
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            <input type="number" value={line.doseAmount||""} placeholder="400"
+              onChange={e=>onUpdate(line.id,"doseAmount",parseFloat(e.target.value)||"")}
+              style={{flex:1,minWidth:0,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 8px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
+            <select value={line.doseUnit||"mg"}
+              onChange={e=>onUpdate(line.id,"doseUnit",e.target.value)}
+              style={{background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 6px",color:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:12,cursor:"pointer",flexShrink:0}}>
+              {["mg","mcg","g","units"].map(u=><option key={u} value={u}>{u}</option>)}
+            </select>
+            <span style={{fontFamily:"IBM Plex Mono",fontSize:12,color:COLORS.muted,alignSelf:"center",whiteSpace:"nowrap"}}>/mL</span>
+          </div>
         </div>
+      </div>
+
+      {/* Row 3: Notes full width */}
+      <div style={{marginBottom:12}}>
+        <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Notes</div>
+        <input type="text" value={line.notes||""} placeholder="optional"
+          onChange={e=>onUpdate(line.id,"notes",e.target.value)}
+          style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 10px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
       </div>
 
       {/* Result */}
@@ -616,16 +664,18 @@ function LineCard({line,onUpdate,onRemove}){
           {line.isBolus?(
             <>
               <span style={{fontFamily:"IBM Plex Mono",fontSize:24,fontWeight:700,color:COLORS.warn}}>{line.volumeMl||"—"}</span>
-              <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>{line.unit||"mL"} bolus</span>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>mL bolus</span>
               <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginTop:2}}>
-                {rate?`over ${fmtTime(line.timeMin)} (${rate.toFixed(1)} ${line.unit||"mL"}/hr)`:`over ${fmtTime(line.timeMin)}`}
+                {rate?`over ${fmtTime(line.timeMin)} (${rate.toFixed(1)} mL/hr)`:`over ${fmtTime(line.timeMin)}`}
               </div>
+              {line.doseAmount&&<div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.accent,marginTop:2}}>{line.doseAmount}{line.doseUnit}/mL concentration</div>}
             </>
           ):(
             <>
               <span style={{fontFamily:"IBM Plex Mono",fontSize:24,fontWeight:700,color:COLORS.accent}}>{rate?rate.toFixed(1):"—"}</span>
-              <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>{line.unit||"mL"}/hr</span>
-              <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginTop:2}}>{line.volumeMl||"—"}{line.unit||"mL"} over {fmtTime(line.timeMin)}</div>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>mL/hr</span>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginTop:2}}>{line.volumeMl||"—"}mL over {fmtTime(line.timeMin)}</div>
+              {line.doseAmount&&<div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.accent,marginTop:2}}>{line.doseAmount}{line.doseUnit}/mL</div>}
             </>
           )}
         </div>
@@ -675,7 +725,14 @@ export default function App(){
   function dismissInstall(){try{localStorage.setItem('shiftmate_install_dismissed','true');}catch{}setShowInstall(false);}
 
   function addLine(data={},source="manual"){
-    setLines(prev=>[...prev,{id:nextId,room:data.room||"",drug:data.drug||"",volumeMl:data.volumeMl||"",timeMin:data.timeMin||"",unit:data.unit||"mL",notes:data.notes||"",highlight:data.highlight||false,timerRunning:false,timerEndsAt:null,isBolus:data.isBolus||false,bagStartedAt:null}]);
+    setLines(prev=>[...prev,{
+      id:nextId,room:data.room||"",drug:data.drug||"",
+      volumeMl:data.volumeMl||"",timeMin:data.timeMin||"",
+      doseAmount:data.doseAmount||"",doseUnit:data.doseUnit||"mg",
+      notes:data.notes||"",highlight:data.highlight||false,
+      timerRunning:false,timerEndsAt:null,
+      isBolus:data.isBolus||false,bagStartedAt:null
+    }]);
     setNextId(n=>n+1);
     if(window.gtag)window.gtag('event','line_added',{source});
   }
@@ -716,8 +773,22 @@ export default function App(){
     setLoading(false);
   }
 
-  function onVoiceTranscript(transcript){setInput(transcript);if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});submit(transcript);}
-  function onStopAndParse(){if(input.trim()){if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});submit(input);}}
+  const latestTranscriptRef = useRef("");
+
+  function onVoiceTranscript(transcript){
+    latestTranscriptRef.current = transcript;
+    setInput(transcript);
+    if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});
+    submit(transcript);
+  }
+
+  function onStopAndParse(){
+    const txt = latestTranscriptRef.current || input;
+    if(txt.trim()){
+      if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});
+      submit(txt);
+    }
+  }
 
   return(
     <div style={{background:COLORS.bg,minHeight:"100vh",backgroundImage:"linear-gradient(rgba(0,212,170,0.025) 1px,transparent 1px),linear-gradient(90deg,rgba(0,212,170,0.025) 1px,transparent 1px)",backgroundSize:"32px 32px"}}>
