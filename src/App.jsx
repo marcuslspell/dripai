@@ -267,61 +267,92 @@ function VoiceButton({onTranscript,disabled,onStopAndParse}){
 // ─── Line Timer Display ────────────────────────────────────────────────────
 function LineTimer({line,onUpdate}){
   const isBolus=line.isBolus||false;
+  const rate=calcMlHr(line.volumeMl,line.timeMin); // mL/hr equivalent
 
-  // For bolus: track remaining seconds (count down)
-  // For continuous: track elapsed seconds (count up)
-  const [remaining,setRemaining]=useState(()=>{
+  // ── Bag life calculation (continuous only) ──────────────────────────────
+  // bagLifeSecs = volume / rate * 3600
+  // We need volume in mL — if unit is mL use directly, else treat as same number
+  // (clinical note: bag life calc only meaningful for mL amounts)
+  const bagLifeSecs=(!isBolus&&line.volumeMl&&rate)?Math.round((line.volumeMl/rate)*3600):null;
+
+  // Bag replacement countdown — starts from when nurse taps "Hung at XX:XX"
+  const [bagStartedAt,setBagStartedAt]=useState(line.bagStartedAt||null);
+  const [bagRemaining,setBagRemaining]=useState(()=>{
+    if(!line.bagStartedAt||!bagLifeSecs)return bagLifeSecs;
+    const elapsed=Math.floor((Date.now()-line.bagStartedAt)/1000);
+    return Math.max(0,bagLifeSecs-elapsed);
+  });
+
+  // Bolus countdown state
+  const [bolusRemaining,setBolusRemaining]=useState(()=>{
     if(!line.timerEndsAt)return line.timeMin?line.timeMin*60:0;
     return Math.max(0,Math.floor((line.timerEndsAt-Date.now())/1000));
   });
+
+  // Elapsed count-up state (continuous secondary)
   const [elapsed,setElapsed]=useState(()=>{
-    if(!line.timerStartedAt)return 0;
-    if(!line.timerRunning)return line.timerElapsed||0;
-    return Math.floor((Date.now()-line.timerStartedAt)/1000)+(line.timerElapsed||0);
+    if(!line.bagStartedAt)return 0;
+    return Math.floor((Date.now()-line.bagStartedAt)/1000);
   });
-  const intervalRef=useRef(null);
 
+  const bagIntervalRef=useRef(null);
+  const bolusIntervalRef=useRef(null);
+
+  // Bag replacement countdown tick
   useEffect(()=>{
-    clearInterval(intervalRef.current);
-    if(!line.timerRunning)return;
+    clearInterval(bagIntervalRef.current);
+    if(!line.bagStartedAt||!bagLifeSecs||isBolus)return;
+    bagIntervalRef.current=setInterval(()=>{
+      const e=Math.floor((Date.now()-line.bagStartedAt)/1000);
+      setElapsed(e);
+      const rem=Math.max(0,bagLifeSecs-e);
+      setBagRemaining(rem);
+      // 10 min warning
+      if(rem===600){sendNotification(`🛍️ Room ${line.room||"?"}`,`${line.drug||"IV"} — bag needs replacing in 10 minutes`);}
+      // 5 min warning
+      if(rem===300){sendNotification(`⚠️ Room ${line.room||"?"}`,`${line.drug||"IV"} — replace bag in 5 minutes`);}
+      if(rem===0){
+        sendNotification(`🔴 Room ${line.room||"?"}`,`${line.drug||"IV"} — bag empty, replace now`);
+        clearInterval(bagIntervalRef.current);
+      }
+    },1000);
+    return()=>clearInterval(bagIntervalRef.current);
+  },[line.bagStartedAt,bagLifeSecs,isBolus]);
 
-    if(isBolus){
-      // Count down
-      intervalRef.current=setInterval(()=>{
-        const r=Math.max(0,Math.floor((line.timerEndsAt-Date.now())/1000));
-        setRemaining(r);
-        if(r===300){sendNotification(`⚠️ Room ${line.room||"?"}`,`${line.drug||"IV line"} — 5 minutes remaining`);}
-        if(r===0){
-          sendNotification(`🔔 Room ${line.room||"?"}`,`${line.drug||"IV line"} — bolus complete`);
-          onUpdate(line.id,"timerRunning",false);
-          setTimeout(()=>onUpdate(line.id,"timerEndsAt",null),3000);
-          clearInterval(intervalRef.current);
-        }
-      },1000);
-    } else {
-      // Count up
-      intervalRef.current=setInterval(()=>{
-        const e=Math.floor((Date.now()-line.timerStartedAt)/1000)+(line.timerElapsed||0);
-        setElapsed(e);
-      },1000);
+  // Bolus countdown tick
+  useEffect(()=>{
+    clearInterval(bolusIntervalRef.current);
+    if(!line.timerRunning||!line.timerEndsAt||!isBolus)return;
+    bolusIntervalRef.current=setInterval(()=>{
+      const r=Math.max(0,Math.floor((line.timerEndsAt-Date.now())/1000));
+      setBolusRemaining(r);
+      if(r===300){sendNotification(`⚠️ Room ${line.room||"?"}`,`${line.drug||"IV line"} — 5 minutes remaining`);}
+      if(r===0){
+        sendNotification(`🔔 Room ${line.room||"?"}`,`${line.drug||"IV line"} — bolus complete`);
+        onUpdate(line.id,"timerRunning",false);
+        setTimeout(()=>onUpdate(line.id,"timerEndsAt",null),3000);
+        clearInterval(bolusIntervalRef.current);
+      }
+    },1000);
+    return()=>clearInterval(bolusIntervalRef.current);
+  },[line.timerRunning,line.timerEndsAt,isBolus]);
+
+  // Sync bolus remaining when timeMin changes
+  useEffect(()=>{
+    if(isBolus&&!line.timerRunning&&line.timeMin)setBolusRemaining(line.timeMin*60);
+  },[line.timeMin,line.timerRunning,isBolus]);
+
+  // Sync bag remaining when volume/rate changes
+  useEffect(()=>{
+    if(!isBolus&&bagLifeSecs&&line.bagStartedAt){
+      const e=Math.floor((Date.now()-line.bagStartedAt)/1000);
+      setBagRemaining(Math.max(0,bagLifeSecs-e));
+    } else if(!isBolus&&bagLifeSecs&&!line.bagStartedAt){
+      setBagRemaining(bagLifeSecs);
     }
-    return()=>clearInterval(intervalRef.current);
-  },[line.timerRunning,line.timerEndsAt,line.timerStartedAt,isBolus]);
+  },[bagLifeSecs,isBolus]);
 
-  // sync remaining when timeMin changes
-  useEffect(()=>{
-    if(!line.timerRunning&&line.timeMin)setRemaining(line.timeMin*60);
-  },[line.timeMin,line.timerRunning]);
-
-  // Bolus progress bar
-  const totalSecs=line.timeMin?(line.timeMin*60):0;
-  const bolusRemaining=line.timerEndsAt?Math.max(0,Math.floor((line.timerEndsAt-Date.now())/1000)):remaining;
-  const bolusPct=totalSecs>0?Math.round((bolusRemaining/totalSecs)*100):0;
-  const isBolusLow=isBolus&&bolusRemaining>0&&bolusRemaining<=300;
-  const isBolusDone=isBolus&&bolusRemaining===0&&line.timerEndsAt;
-  const bolusBarColor=isBolusDone?COLORS.danger:isBolusLow?COLORS.warn:COLORS.warn;
-
-  // Continuous elapsed display
+  // Helpers
   function fmtElapsed(secs){
     const h=Math.floor(secs/3600);
     const m=Math.floor((secs%3600)/60);
@@ -329,99 +360,169 @@ function LineTimer({line,onUpdate}){
     if(h>0)return`${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
     return`${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
   }
+  function fmtBagTime(secs){
+    if(!secs&&secs!==0)return"—";
+    const h=Math.floor(secs/3600);
+    const m=Math.floor((secs%3600)/60);
+    if(h>0)return`${h}h ${m}m`;
+    return`${m}m`;
+  }
 
-  function handleStart(){
+  // Bolus helpers
+  const totalBolusSecs=line.timeMin?(line.timeMin*60):0;
+  const bolusPct=totalBolusSecs>0?Math.round((bolusRemaining/totalBolusSecs)*100):0;
+  const isBolusLow=isBolus&&bolusRemaining>0&&bolusRemaining<=300;
+  const isBolusDone=isBolus&&bolusRemaining===0&&line.timerEndsAt;
+
+  // Bag status
+  const bagPct=bagLifeSecs&&bagLifeSecs>0?Math.round(((bagRemaining||0)/bagLifeSecs)*100):0;
+  const bagIsLow=(bagRemaining||0)<=600&&(bagRemaining||0)>0&&line.bagStartedAt;
+  const bagIsCritical=(bagRemaining||0)<=300&&(bagRemaining||0)>0&&line.bagStartedAt;
+  const bagIsDone=line.bagStartedAt&&bagRemaining===0;
+  const bagBarColor=bagIsDone||bagIsCritical?COLORS.danger:bagIsLow?COLORS.warn:COLORS.accent;
+
+  function hangBag(){
     requestNotificationPermission();
-    if(isBolus){
-      const endsAt=Date.now()+(remaining*1000);
-      onUpdate(line.id,"timerEndsAt",endsAt);
-    } else {
-      onUpdate(line.id,"timerStartedAt",Date.now());
-    }
-    onUpdate(line.id,"timerRunning",true);
-    if(window.gtag)window.gtag('event','timer_started',{type:isBolus?'bolus':'continuous'});
+    const now=Date.now();
+    onUpdate(line.id,"bagStartedAt",now);
+    setBagStartedAt(now);
+    setBagRemaining(bagLifeSecs);
+    setElapsed(0);
+    if(window.gtag)window.gtag('event','bag_started');
   }
-
-  function handleStop(){
-    if(!isBolus){
-      // save elapsed so far before pausing
-      const currentElapsed=Math.floor((Date.now()-line.timerStartedAt)/1000)+(line.timerElapsed||0);
-      onUpdate(line.id,"timerElapsed",currentElapsed);
-      setElapsed(currentElapsed);
-    }
-    onUpdate(line.id,"timerRunning",false);
-  }
-
-  function handleReset(){
-    onUpdate(line.id,"timerRunning",false);
-    onUpdate(line.id,"timerEndsAt",null);
-    onUpdate(line.id,"timerStartedAt",null);
-    onUpdate(line.id,"timerElapsed",0);
-    setRemaining(line.timeMin?line.timeMin*60:0);
+  function resetBag(){
+    onUpdate(line.id,"bagStartedAt",null);
+    setBagStartedAt(null);
+    setBagRemaining(bagLifeSecs);
     setElapsed(0);
   }
+  function handleBolusStart(){
+    requestNotificationPermission();
+    const endsAt=Date.now()+(bolusRemaining*1000);
+    onUpdate(line.id,"timerEndsAt",endsAt);
+    onUpdate(line.id,"timerRunning",true);
+    if(window.gtag)window.gtag('event','timer_started',{type:'bolus'});
+  }
+  function handleBolusStop(){onUpdate(line.id,"timerRunning",false);}
+  function handleBolusReset(){
+    onUpdate(line.id,"timerRunning",false);
+    onUpdate(line.id,"timerEndsAt",null);
+    setBolusRemaining(line.timeMin?line.timeMin*60:0);
+  }
 
-  if(!line.timeMin&&!isBolus&&!line.timerRunning&&elapsed===0)return null;
-  if(!line.timeMin&&isBolus)return null;
+  // Don't render if nothing to show
+  if(!isBolus&&!bagLifeSecs)return null;
+  if(isBolus&&!line.timeMin)return null;
 
+  // ── CONTINUOUS ──────────────────────────────────────────────────────────
+  if(!isBolus){
+    return(
+      <div style={{marginTop:10,background:COLORS.surface2,borderRadius:8,padding:"12px 14px"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.accent}}>
+            Bag Replacement
+          </div>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            {!line.bagStartedAt&&(
+              <button onClick={hangBag}
+                style={{background:"rgba(0,212,170,0.1)",border:`1px solid ${COLORS.accent}`,borderRadius:5,padding:"3px 12px",color:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer",fontWeight:600}}>
+                ✓ Hung now
+              </button>
+            )}
+            {line.bagStartedAt&&(
+              <button onClick={hangBag}
+                style={{background:"rgba(0,212,170,0.06)",border:`1px solid ${COLORS.border}`,borderRadius:5,padding:"3px 10px",color:COLORS.muted,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer"}}>
+                ↺ New bag
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Bag life bar */}
+        <div style={{background:COLORS.border,borderRadius:4,height:5,marginBottom:10,overflow:"hidden"}}>
+          <div style={{
+            height:"100%",
+            width:`${line.bagStartedAt?bagPct:100}%`,
+            background:line.bagStartedAt?bagBarColor:`linear-gradient(90deg,${COLORS.accent},${COLORS.blue})`,
+            borderRadius:4,
+            transition:"width 1s linear",
+            opacity:line.bagStartedAt?1:0.3,
+          }}/>
+        </div>
+
+        {/* Primary: bag replacement countdown */}
+        {!line.bagStartedAt&&(
+          <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+            <span style={{fontFamily:"IBM Plex Mono",fontSize:22,fontWeight:700,color:COLORS.accent}}>
+              {fmtBagTime(bagLifeSecs)}
+            </span>
+            <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted}}>per bag at current rate</span>
+          </div>
+        )}
+        {line.bagStartedAt&&(
+          <div>
+            <div style={{display:"flex",alignItems:"baseline",gap:6,marginBottom:4}}>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:24,fontWeight:700,color:bagIsDone?COLORS.danger:bagIsCritical?COLORS.danger:bagIsLow?COLORS.warn:COLORS.text}}>
+                {bagIsDone?"REPLACE NOW":fmtBagTime(bagRemaining||0)}
+              </span>
+              {!bagIsDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:bagIsLow?COLORS.warn:COLORS.muted}}>
+                {bagIsLow?"⚠ replace soon":"until bag empty"}
+              </span>}
+              {bagIsDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.danger}}>bag empty</span>}
+            </div>
+            {/* Secondary: elapsed count-up */}
+            <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted}}>
+              {fmtElapsed(elapsed)} elapsed since hang
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── BOLUS ───────────────────────────────────────────────────────────────
   return(
     <div style={{marginTop:10,background:COLORS.surface2,borderRadius:8,padding:"10px 12px"}}>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-        <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:isBolus?COLORS.warn:COLORS.accent}}>
-          {isBolus?"Bolus Timer":"Running Time"}
+        <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.warn}}>
+          Bolus Timer
         </div>
-        <div style={{display:"flex",gap:6}}>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
           {!line.timerRunning&&!isBolusDone&&(
-            <button onClick={handleStart} style={{background:isBolus?"rgba(245,158,11,0.1)":"rgba(0,212,170,0.1)",border:`1px solid ${isBolus?COLORS.warn:COLORS.accent}`,borderRadius:5,padding:"3px 10px",color:isBolus?COLORS.warn:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer",fontWeight:600}}>
-              ▶ {elapsed>0?"Resume":"Start"}
+            <button onClick={handleBolusStart}
+              style={{background:"rgba(245,158,11,0.1)",border:`1px solid ${COLORS.warn}`,borderRadius:5,padding:"3px 10px",color:COLORS.warn,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer",fontWeight:600}}>
+              ▶ Start
             </button>
           )}
           {line.timerRunning&&(
-            <button onClick={handleStop} style={{background:"rgba(245,158,11,0.1)",border:`1px solid ${COLORS.warn}`,borderRadius:5,padding:"3px 10px",color:COLORS.warn,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer",fontWeight:600}}>⏸ Pause</button>
+            <button onClick={handleBolusStop}
+              style={{background:"rgba(245,158,11,0.1)",border:`1px solid ${COLORS.warn}`,borderRadius:5,padding:"3px 10px",color:COLORS.warn,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer",fontWeight:600}}>⏸ Pause</button>
           )}
-          {(line.timerRunning||elapsed>0||line.timerEndsAt||isBolusDone)&&(
-            <button onClick={handleReset} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:5,padding:"3px 10px",color:COLORS.muted,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer"}}>↺ Reset</button>
+          {(line.timerEndsAt||isBolusDone)&&(
+            <button onClick={handleBolusReset}
+              style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:5,padding:"3px 10px",color:COLORS.muted,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer"}}>↺ Reset</button>
+          )}
+          {/* Phone timer tip for background alerts */}
+          {line.timeMin&&(
+            <span
+              onClick={()=>alert(`Tip: Set a ${line.timeMin}-minute timer in your phone's Clock app to get alerted when your screen is locked.`)}
+              style={{fontFamily:"IBM Plex Mono",fontSize:9,color:COLORS.muted,borderBottom:`1px dashed ${COLORS.border}`,cursor:"pointer",whiteSpace:"nowrap"}}>
+              ⏰ phone timer
+            </span>
           )}
         </div>
       </div>
-
-      {/* Bolus: progress bar counting down */}
-      {isBolus&&(
-        <div style={{background:COLORS.border,borderRadius:4,height:4,marginBottom:8,overflow:"hidden"}}>
-          <div style={{height:"100%",width:`${bolusPct}%`,background:bolusBarColor,borderRadius:4,transition:"width 1s linear",boxShadow:line.timerRunning?`0 0 6px ${bolusBarColor}`:"none"}}/>
-        </div>
-      )}
-
-      {/* Continuous: thin growing bar */}
-      {!isBolus&&line.timerRunning&&(
-        <div style={{background:COLORS.border,borderRadius:4,height:3,marginBottom:8,overflow:"hidden"}}>
-          <div style={{height:"100%",width:"100%",background:`linear-gradient(90deg,${COLORS.accent},${COLORS.blue})`,borderRadius:4,animation:"scan 2s linear infinite",opacity:0.6}}/>
-        </div>
-      )}
-
-      {/* Time display */}
+      {/* Bolus countdown bar */}
+      <div style={{background:COLORS.border,borderRadius:4,height:4,marginBottom:8,overflow:"hidden"}}>
+        <div style={{height:"100%",width:`${bolusPct}%`,background:isBolusDone?COLORS.danger:isBolusLow?COLORS.warn:COLORS.warn,borderRadius:4,transition:"width 1s linear",boxShadow:line.timerRunning?`0 0 6px ${COLORS.warn}`:"none"}}/>
+      </div>
       <div style={{display:"flex",alignItems:"baseline",gap:6}}>
-        {isBolus?(
-          <>
-            <span style={{fontFamily:"IBM Plex Mono",fontSize:22,fontWeight:700,color:isBolusDone?COLORS.danger:isBolusLow?COLORS.warn:COLORS.text}}>
-              {isBolusDone?"DONE":fmtCountdown(bolusRemaining)}
-            </span>
-            {!isBolusDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted}}>remaining of {fmtTime(line.timeMin)}</span>}
-            {isBolusDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.danger}}>bolus complete</span>}
-            {isBolusLow&&!isBolusDone&&line.timerRunning&&(
-              <span style={{fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.warn,marginLeft:"auto",animation:"pulse 1s ease-in-out infinite"}}>⚠ ending soon</span>
-            )}
-          </>
-        ):(
-          <>
-            <span style={{fontFamily:"IBM Plex Mono",fontSize:22,fontWeight:700,color:COLORS.accent}}>
-              {fmtElapsed(elapsed)}
-            </span>
-            <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted}}>
-              {line.timerRunning?"elapsed":"paused"}
-            </span>
-          </>
-        )}
+        <span style={{fontFamily:"IBM Plex Mono",fontSize:22,fontWeight:700,color:isBolusDone?COLORS.danger:isBolusLow?COLORS.warn:COLORS.text}}>
+          {isBolusDone?"DONE":fmtCountdown(bolusRemaining)}
+        </span>
+        {!isBolusDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted}}>remaining of {fmtTime(line.timeMin)}</span>}
+        {isBolusDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.danger}}>bolus complete</span>}
+        {isBolusLow&&!isBolusDone&&line.timerRunning&&<span style={{fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.warn,marginLeft:"auto",animation:"pulse 1s ease-in-out infinite"}}>⚠ ending soon</span>}
       </div>
     </div>
   );
@@ -465,49 +566,47 @@ function LineCard({line,onUpdate,onRemove}){
         <button onClick={()=>onRemove(line.id)} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"4px 9px",color:COLORS.muted,cursor:"pointer",fontSize:12}}>✕</button>
       </div>
 
-      {/* Fields */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",gap:8,marginBottom:12}}>
-        {/* Room */}
+      {/* Fields — 2 col on mobile, 3 col on wider screens */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(2, 1fr)",gap:10,marginBottom:12}}>
+        {/* Row 1: Room + Drug */}
         <div>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Room</div>
           <input type="text" value={line.room||""} placeholder="4A"
             onChange={e=>onUpdate(line.id,"room",e.target.value)}
-            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 9px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 10px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
         </div>
-        {/* Drug */}
         <div>
-          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Drug</div>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Drug / Fluid</div>
           <input type="text" value={line.drug||""} placeholder="Heparin"
             onChange={e=>onUpdate(line.id,"drug",e.target.value)}
-            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 9px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 10px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
         </div>
-        {/* Volume + Unit */}
+        {/* Row 2: Amount + Time */}
         <div>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Amount</div>
-          <div style={{display:"flex",gap:4}}>
+          <div style={{display:"flex",gap:6}}>
             <input type="number" value={line.volumeMl||""} placeholder="100"
               onChange={e=>onUpdate(line.id,"volumeMl",parseFloat(e.target.value)||"")}
-              style={{flex:1,minWidth:0,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 6px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+              style={{flex:1,minWidth:0,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 8px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
             <select value={line.unit||"mL"}
               onChange={e=>onUpdate(line.id,"unit",e.target.value)}
-              style={{background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 4px",color:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:11,cursor:"pointer",flexShrink:0}}>
+              style={{background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 6px",color:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:12,cursor:"pointer",flexShrink:0}}>
               {UNITS.map(u=><option key={u} value={u}>{u}</option>)}
             </select>
           </div>
         </div>
-        {/* Time */}
         <div>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Over (min)</div>
           <input type="number" value={line.timeMin||""} placeholder="60"
             onChange={e=>onUpdate(line.id,"timeMin",parseFloat(e.target.value)||"")}
-            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 9px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 10px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
         </div>
-        {/* Notes */}
-        <div>
+        {/* Row 3: Notes full width */}
+        <div style={{gridColumn:"1 / -1"}}>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Notes</div>
           <input type="text" value={line.notes||""} placeholder="optional"
             onChange={e=>onUpdate(line.id,"notes",e.target.value)}
-            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 9px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 10px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
         </div>
       </div>
 
@@ -576,7 +675,7 @@ export default function App(){
   function dismissInstall(){try{localStorage.setItem('shiftmate_install_dismissed','true');}catch{}setShowInstall(false);}
 
   function addLine(data={},source="manual"){
-    setLines(prev=>[...prev,{id:nextId,room:data.room||"",drug:data.drug||"",volumeMl:data.volumeMl||"",timeMin:data.timeMin||"",unit:data.unit||"mL",notes:data.notes||"",highlight:data.highlight||false,timerRunning:false,timerEndsAt:null,isBolus:data.isBolus||false}]);
+    setLines(prev=>[...prev,{id:nextId,room:data.room||"",drug:data.drug||"",volumeMl:data.volumeMl||"",timeMin:data.timeMin||"",unit:data.unit||"mL",notes:data.notes||"",highlight:data.highlight||false,timerRunning:false,timerEndsAt:null,isBolus:data.isBolus||false,bagStartedAt:null}]);
     setNextId(n=>n+1);
     if(window.gtag)window.gtag('event','line_added',{source});
   }
