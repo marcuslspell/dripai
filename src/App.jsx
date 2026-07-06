@@ -244,17 +244,47 @@ function StatusBanner({status}){
 function VoiceButton({onTranscript,disabled,onStopAndParse}){
   const [listening,setListening]=useState(false);
   const recogRef=useRef(null);
-  function stopRecording(){recogRef.current?.stop();recogRef.current=null;setListening(false);}
+  const pendingStopRef=useRef(false);
+
   const toggle=useCallback(()=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
     if(!SR){alert("Voice input not supported. Try Chrome on Android or Safari on iOS.");return;}
-    if(listening){stopRecording();onStopAndParse();return;}
-    const r=new SR();r.lang="en-US";r.interimResults=false;r.maxAlternatives=1;recogRef.current=r;
-    r.onresult=e=>{const t=e.results[0][0].transcript;setListening(false);recogRef.current=null;onTranscript(t);};
-    r.onerror=()=>{setListening(false);recogRef.current=null;};
-    r.onend=()=>{setListening(false);recogRef.current=null;};
-    r.start();setListening(true);
+
+    if(listening){
+      // Mark that we want to parse when the result comes in
+      pendingStopRef.current=true;
+      recogRef.current?.stop();
+      setListening(false);
+      return;
+    }
+
+    const r=new SR();
+    r.lang="en-US";r.interimResults=false;r.maxAlternatives=1;
+    recogRef.current=r;
+
+    r.onresult=e=>{
+      const transcript=e.results[0][0].transcript;
+      setListening(false);
+      recogRef.current=null;
+      // Always pass transcript up — whether user tapped stop or it ended naturally
+      onTranscript(transcript);
+      pendingStopRef.current=false;
+    };
+    r.onerror=()=>{setListening(false);recogRef.current=null;pendingStopRef.current=false;};
+    r.onend=()=>{
+      setListening(false);
+      recogRef.current=null;
+      // If stopped manually but no result came (silence), call onStopAndParse with whatever input exists
+      if(pendingStopRef.current){
+        pendingStopRef.current=false;
+        onStopAndParse();
+      }
+    };
+    r.start();
+    setListening(true);
+    pendingStopRef.current=false;
   },[listening,onTranscript,onStopAndParse]);
+
   return(
     <button onClick={toggle} disabled={disabled} title={listening?"Tap to stop and parse":"Tap to speak"}
       style={{position:"relative",width:46,height:46,borderRadius:"50%",background:listening?"rgba(239,68,68,0.15)":COLORS.surface2,border:`1px solid ${listening?COLORS.danger:COLORS.border}`,color:listening?COLORS.danger:COLORS.muted,fontSize:18,cursor:disabled?"not-allowed":"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all 0.2s"}}>
@@ -267,61 +297,101 @@ function VoiceButton({onTranscript,disabled,onStopAndParse}){
 // ─── Line Timer Display ────────────────────────────────────────────────────
 function LineTimer({line,onUpdate}){
   const isBolus=line.isBolus||false;
+  const rate=calcMlHr(line.volumeMl,line.timeMin); // mL/hr equivalent
 
-  // For bolus: track remaining seconds (count down)
-  // For continuous: track elapsed seconds (count up)
-  const [remaining,setRemaining]=useState(()=>{
+  // ── Bag life calculation (continuous only) ──────────────────────────────
+  // bagLifeSecs = volume / rate * 3600
+  // We need volume in mL — if unit is mL use directly, else treat as same number
+  // (clinical note: bag life calc only meaningful for mL amounts)
+  const bagLifeSecs=(!isBolus&&line.volumeMl&&rate)?Math.round((line.volumeMl/rate)*3600):null;
+
+  // Bag replacement countdown — starts from when nurse taps "Hung at XX:XX"
+  const [bagStartedAt,setBagStartedAt]=useState(line.bagStartedAt||null);
+  const [bagRemaining,setBagRemaining]=useState(()=>{
+    if(!line.bagStartedAt||!bagLifeSecs)return bagLifeSecs;
+    const elapsed=Math.floor((Date.now()-line.bagStartedAt)/1000);
+    return Math.max(0,bagLifeSecs-elapsed);
+  });
+
+  // Bolus countdown state
+  const [bolusRemaining,setBolusRemaining]=useState(()=>{
     if(!line.timerEndsAt)return line.timeMin?line.timeMin*60:0;
     return Math.max(0,Math.floor((line.timerEndsAt-Date.now())/1000));
   });
+
+  // Elapsed count-up state (continuous secondary)
   const [elapsed,setElapsed]=useState(()=>{
-    if(!line.timerStartedAt)return 0;
-    if(!line.timerRunning)return line.timerElapsed||0;
-    return Math.floor((Date.now()-line.timerStartedAt)/1000)+(line.timerElapsed||0);
+    if(!line.bagStartedAt)return 0;
+    return Math.floor((Date.now()-line.bagStartedAt)/1000);
   });
-  const intervalRef=useRef(null);
 
+  const bagIntervalRef=useRef(null);
+  const bolusIntervalRef=useRef(null);
+
+  // Bag replacement countdown tick
   useEffect(()=>{
-    clearInterval(intervalRef.current);
-    if(!line.timerRunning)return;
+    clearInterval(bagIntervalRef.current);
+    if(!line.bagStartedAt||!bagLifeSecs||isBolus)return;
+    bagIntervalRef.current=setInterval(()=>{
+      const e=Math.floor((Date.now()-line.bagStartedAt)/1000);
+      setElapsed(e);
+      const rem=Math.max(0,bagLifeSecs-e);
+      setBagRemaining(rem);
+      // 10 min warning
+      if(rem===600){
+        sendNotification(`🛍️ Room ${line.room||"?"}`,`${line.drug||"IV"} — bag needs replacing in 10 minutes`);
+        if(navigator.vibrate){navigator.vibrate([200,100,200]);}
+      }
+      // 5 min warning
+      if(rem===300){
+        sendNotification(`⚠️ Room ${line.room||"?"}`,`${line.drug||"IV"} — replace bag in 5 minutes`);
+        if(navigator.vibrate){navigator.vibrate([400,150,400,150,400]);}
+      }
+      if(rem===0){
+        sendNotification(`🔴 Room ${line.room||"?"}`,`${line.drug||"IV"} — bag empty, replace now`);
+        if(navigator.vibrate){navigator.vibrate([600,200,600,200,600,200,600]);}
+        clearInterval(bagIntervalRef.current);
+      }
+    },1000);
+    return()=>clearInterval(bagIntervalRef.current);
+  },[line.bagStartedAt,bagLifeSecs,isBolus]);
 
-    if(isBolus){
-      // Count down
-      intervalRef.current=setInterval(()=>{
-        const r=Math.max(0,Math.floor((line.timerEndsAt-Date.now())/1000));
-        setRemaining(r);
-        if(r===300){sendNotification(`⚠️ Room ${line.room||"?"}`,`${line.drug||"IV line"} — 5 minutes remaining`);}
-        if(r===0){
-          sendNotification(`🔔 Room ${line.room||"?"}`,`${line.drug||"IV line"} — bolus complete`);
-          onUpdate(line.id,"timerRunning",false);
-          setTimeout(()=>onUpdate(line.id,"timerEndsAt",null),3000);
-          clearInterval(intervalRef.current);
-        }
-      },1000);
-    } else {
-      // Count up
-      intervalRef.current=setInterval(()=>{
-        const e=Math.floor((Date.now()-line.timerStartedAt)/1000)+(line.timerElapsed||0);
-        setElapsed(e);
-      },1000);
+  // Bolus countdown tick
+  useEffect(()=>{
+    clearInterval(bolusIntervalRef.current);
+    if(!line.timerRunning||!line.timerEndsAt||!isBolus)return;
+    bolusIntervalRef.current=setInterval(()=>{
+      const r=Math.max(0,Math.floor((line.timerEndsAt-Date.now())/1000));
+      setBolusRemaining(r);
+      if(r===300){sendNotification(`⚠️ Room ${line.room||"?"}`,`${line.drug||"IV line"} — 5 minutes remaining`);}
+      if(r===0){
+        sendNotification(`🔔 Room ${line.room||"?"}`,`${line.drug||"IV line"} — bolus complete`);
+        // Vibrate in a pattern that's hard to miss: buzz-pause-buzz-pause-buzz
+        if(navigator.vibrate){navigator.vibrate([500,200,500,200,500]);}
+        onUpdate(line.id,"timerRunning",false);
+        // No auto-reset — nurse must manually reset so they see the DONE state clearly
+        clearInterval(bolusIntervalRef.current);
+      }
+    },1000);
+    return()=>clearInterval(bolusIntervalRef.current);
+  },[line.timerRunning,line.timerEndsAt,isBolus]);
+
+  // Sync bolus remaining when timeMin changes
+  useEffect(()=>{
+    if(isBolus&&!line.timerRunning&&line.timeMin)setBolusRemaining(line.timeMin*60);
+  },[line.timeMin,line.timerRunning,isBolus]);
+
+  // Sync bag remaining when volume/rate changes
+  useEffect(()=>{
+    if(!isBolus&&bagLifeSecs&&line.bagStartedAt){
+      const e=Math.floor((Date.now()-line.bagStartedAt)/1000);
+      setBagRemaining(Math.max(0,bagLifeSecs-e));
+    } else if(!isBolus&&bagLifeSecs&&!line.bagStartedAt){
+      setBagRemaining(bagLifeSecs);
     }
-    return()=>clearInterval(intervalRef.current);
-  },[line.timerRunning,line.timerEndsAt,line.timerStartedAt,isBolus]);
+  },[bagLifeSecs,isBolus]);
 
-  // sync remaining when timeMin changes
-  useEffect(()=>{
-    if(!line.timerRunning&&line.timeMin)setRemaining(line.timeMin*60);
-  },[line.timeMin,line.timerRunning]);
-
-  // Bolus progress bar
-  const totalSecs=line.timeMin?(line.timeMin*60):0;
-  const bolusRemaining=line.timerEndsAt?Math.max(0,Math.floor((line.timerEndsAt-Date.now())/1000)):remaining;
-  const bolusPct=totalSecs>0?Math.round((bolusRemaining/totalSecs)*100):0;
-  const isBolusLow=isBolus&&bolusRemaining>0&&bolusRemaining<=300;
-  const isBolusDone=isBolus&&bolusRemaining===0&&line.timerEndsAt;
-  const bolusBarColor=isBolusDone?COLORS.danger:isBolusLow?COLORS.warn:COLORS.warn;
-
-  // Continuous elapsed display
+  // Helpers
   function fmtElapsed(secs){
     const h=Math.floor(secs/3600);
     const m=Math.floor((secs%3600)/60);
@@ -329,108 +399,336 @@ function LineTimer({line,onUpdate}){
     if(h>0)return`${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
     return`${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
   }
+  function fmtBagTime(secs){
+    if(!secs&&secs!==0)return"—";
+    const h=Math.floor(secs/3600);
+    const m=Math.floor((secs%3600)/60);
+    if(h>0)return`${h}h ${m}m`;
+    return`${m}m`;
+  }
 
-  function handleStart(){
+  // Bolus helpers
+  const totalBolusSecs=line.timeMin?(line.timeMin*60):0;
+  const bolusPct=totalBolusSecs>0?Math.round((bolusRemaining/totalBolusSecs)*100):0;
+  const isBolusLow=isBolus&&bolusRemaining>0&&bolusRemaining<=300;
+  const isBolusDone=isBolus&&bolusRemaining===0&&line.timerEndsAt;
+
+  // Bag status
+  const bagPct=bagLifeSecs&&bagLifeSecs>0?Math.round(((bagRemaining||0)/bagLifeSecs)*100):0;
+  const bagIsLow=(bagRemaining||0)<=600&&(bagRemaining||0)>0&&line.bagStartedAt;
+  const bagIsCritical=(bagRemaining||0)<=300&&(bagRemaining||0)>0&&line.bagStartedAt;
+  const bagIsDone=line.bagStartedAt&&bagRemaining===0;
+  const bagBarColor=bagIsDone||bagIsCritical?COLORS.danger:bagIsLow?COLORS.warn:COLORS.accent;
+
+  function hangBag(){
     requestNotificationPermission();
-    if(isBolus){
-      const endsAt=Date.now()+(remaining*1000);
-      onUpdate(line.id,"timerEndsAt",endsAt);
-    } else {
-      onUpdate(line.id,"timerStartedAt",Date.now());
-    }
-    onUpdate(line.id,"timerRunning",true);
-    if(window.gtag)window.gtag('event','timer_started',{type:isBolus?'bolus':'continuous'});
+    const now=Date.now();
+    onUpdate(line.id,"bagStartedAt",now);
+    setBagStartedAt(now);
+    setBagRemaining(bagLifeSecs);
+    setElapsed(0);
+    if(window.gtag)window.gtag('event','bag_started');
   }
-
-  function handleStop(){
-    if(!isBolus){
-      // save elapsed so far before pausing
-      const currentElapsed=Math.floor((Date.now()-line.timerStartedAt)/1000)+(line.timerElapsed||0);
-      onUpdate(line.id,"timerElapsed",currentElapsed);
-      setElapsed(currentElapsed);
-    }
-    onUpdate(line.id,"timerRunning",false);
-  }
-
-  function handleReset(){
-    onUpdate(line.id,"timerRunning",false);
-    onUpdate(line.id,"timerEndsAt",null);
-    onUpdate(line.id,"timerStartedAt",null);
-    onUpdate(line.id,"timerElapsed",0);
-    setRemaining(line.timeMin?line.timeMin*60:0);
+  function resetBag(){
+    onUpdate(line.id,"bagStartedAt",null);
+    setBagStartedAt(null);
+    setBagRemaining(bagLifeSecs);
     setElapsed(0);
   }
+  function handleBolusStart(){
+    requestNotificationPermission();
+    const endsAt=Date.now()+(bolusRemaining*1000);
+    onUpdate(line.id,"timerEndsAt",endsAt);
+    onUpdate(line.id,"timerRunning",true);
+    if(window.gtag)window.gtag('event','timer_started',{type:'bolus'});
+  }
+  function handleBolusStop(){onUpdate(line.id,"timerRunning",false);}
+  function handleBolusReset(){
+    onUpdate(line.id,"timerRunning",false);
+    onUpdate(line.id,"timerEndsAt",null);
+    setBolusRemaining(line.timeMin?line.timeMin*60:0);
+  }
 
-  if(!line.timeMin&&!isBolus&&!line.timerRunning&&elapsed===0)return null;
-  if(!line.timeMin&&isBolus)return null;
+  // Don't render if nothing to show
+  if(!isBolus&&!bagLifeSecs)return null;
+  if(isBolus&&!line.timeMin)return null;
 
+  // ── CONTINUOUS ──────────────────────────────────────────────────────────
+  if(!isBolus){
+    return(
+      <div style={{marginTop:10,background:COLORS.surface2,borderRadius:8,padding:"12px 14px"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.accent}}>
+            Bag Replacement
+          </div>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            {!line.bagStartedAt&&(
+              <button onClick={hangBag}
+                style={{background:"rgba(0,212,170,0.1)",border:`1px solid ${COLORS.accent}`,borderRadius:5,padding:"3px 12px",color:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer",fontWeight:600}}>
+                ✓ Hung now
+              </button>
+            )}
+            {line.bagStartedAt&&(
+              <button onClick={hangBag}
+                style={{background:"rgba(0,212,170,0.06)",border:`1px solid ${COLORS.border}`,borderRadius:5,padding:"3px 10px",color:COLORS.muted,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer"}}>
+                ↺ New bag
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Bag life bar */}
+        <div style={{background:COLORS.border,borderRadius:4,height:5,marginBottom:10,overflow:"hidden"}}>
+          <div style={{
+            height:"100%",
+            width:`${line.bagStartedAt?bagPct:100}%`,
+            background:line.bagStartedAt?bagBarColor:`linear-gradient(90deg,${COLORS.accent},${COLORS.blue})`,
+            borderRadius:4,
+            transition:"width 1s linear",
+            opacity:line.bagStartedAt?1:0.3,
+          }}/>
+        </div>
+
+        {/* Primary: bag replacement countdown */}
+        {!line.bagStartedAt&&(
+          <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+            <span style={{fontFamily:"IBM Plex Mono",fontSize:22,fontWeight:700,color:COLORS.accent}}>
+              {fmtBagTime(bagLifeSecs)}
+            </span>
+            <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted}}>per bag at current rate</span>
+          </div>
+        )}
+        {line.bagStartedAt&&(
+          <div>
+            <div style={{display:"flex",alignItems:"baseline",gap:6,marginBottom:4}}>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:bagIsDone?28:24,fontWeight:700,color:bagIsDone?COLORS.danger:bagIsCritical?COLORS.danger:bagIsLow?COLORS.warn:COLORS.text,animation:bagIsDone?"pulse 1s ease-in-out infinite":"none"}}>
+                {bagIsDone?"⚠ REPLACE NOW":fmtBagTime(bagRemaining||0)}
+              </span>
+              {!bagIsDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:bagIsLow?COLORS.warn:COLORS.muted}}>
+                {bagIsLow?"⚠ replace soon":"until bag empty"}
+              </span>}
+              {bagIsDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.danger,animation:"pulse 1s ease-in-out infinite"}}>bag empty — tap New bag</span>}
+            </div>
+            {/* Secondary: elapsed count-up */}
+            <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted}}>
+              {fmtElapsed(elapsed)} elapsed since hang
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── BOLUS ───────────────────────────────────────────────────────────────
   return(
     <div style={{marginTop:10,background:COLORS.surface2,borderRadius:8,padding:"10px 12px"}}>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-        <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:isBolus?COLORS.warn:COLORS.accent}}>
-          {isBolus?"Bolus Timer":"Running Time"}
+        <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.warn}}>
+          Bolus Timer
         </div>
-        <div style={{display:"flex",gap:6}}>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
           {!line.timerRunning&&!isBolusDone&&(
-            <button onClick={handleStart} style={{background:isBolus?"rgba(245,158,11,0.1)":"rgba(0,212,170,0.1)",border:`1px solid ${isBolus?COLORS.warn:COLORS.accent}`,borderRadius:5,padding:"3px 10px",color:isBolus?COLORS.warn:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer",fontWeight:600}}>
-              ▶ {elapsed>0?"Resume":"Start"}
+            <button onClick={handleBolusStart}
+              style={{background:"rgba(245,158,11,0.1)",border:`1px solid ${COLORS.warn}`,borderRadius:5,padding:"3px 10px",color:COLORS.warn,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer",fontWeight:600}}>
+              ▶ Start
             </button>
           )}
           {line.timerRunning&&(
-            <button onClick={handleStop} style={{background:"rgba(245,158,11,0.1)",border:`1px solid ${COLORS.warn}`,borderRadius:5,padding:"3px 10px",color:COLORS.warn,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer",fontWeight:600}}>⏸ Pause</button>
+            <button onClick={handleBolusStop}
+              style={{background:"rgba(245,158,11,0.1)",border:`1px solid ${COLORS.warn}`,borderRadius:5,padding:"3px 10px",color:COLORS.warn,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer",fontWeight:600}}>⏸ Pause</button>
           )}
-          {(line.timerRunning||elapsed>0||line.timerEndsAt||isBolusDone)&&(
-            <button onClick={handleReset} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:5,padding:"3px 10px",color:COLORS.muted,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer"}}>↺ Reset</button>
+          {(line.timerEndsAt||isBolusDone)&&(
+            <button onClick={handleBolusReset}
+              style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:5,padding:"3px 10px",color:COLORS.muted,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer"}}>↺ Reset</button>
+          )}
+          {/* Phone timer tip for background alerts */}
+          {line.timeMin&&(
+            <span
+              onClick={()=>alert(`Tip: Set a ${line.timeMin}-minute timer in your phone's Clock app to get alerted when your screen is locked.`)}
+              style={{fontFamily:"IBM Plex Mono",fontSize:9,color:COLORS.muted,borderBottom:`1px dashed ${COLORS.border}`,cursor:"pointer",whiteSpace:"nowrap"}}>
+              ⏰ phone timer
+            </span>
           )}
         </div>
       </div>
-
-      {/* Bolus: progress bar counting down */}
-      {isBolus&&(
-        <div style={{background:COLORS.border,borderRadius:4,height:4,marginBottom:8,overflow:"hidden"}}>
-          <div style={{height:"100%",width:`${bolusPct}%`,background:bolusBarColor,borderRadius:4,transition:"width 1s linear",boxShadow:line.timerRunning?`0 0 6px ${bolusBarColor}`:"none"}}/>
-        </div>
-      )}
-
-      {/* Continuous: thin growing bar */}
-      {!isBolus&&line.timerRunning&&(
-        <div style={{background:COLORS.border,borderRadius:4,height:3,marginBottom:8,overflow:"hidden"}}>
-          <div style={{height:"100%",width:"100%",background:`linear-gradient(90deg,${COLORS.accent},${COLORS.blue})`,borderRadius:4,animation:"scan 2s linear infinite",opacity:0.6}}/>
-        </div>
-      )}
-
-      {/* Time display */}
+      {/* Bolus countdown bar - empty and red when done */}
+      <div style={{background:COLORS.border,borderRadius:4,height:4,marginBottom:8,overflow:"hidden"}}>
+        <div style={{height:"100%",width:`${isBolusDone?0:bolusPct}%`,background:isBolusDone?COLORS.danger:isBolusLow?COLORS.warn:COLORS.warn,borderRadius:4,transition:"width 1s linear",boxShadow:line.timerRunning?`0 0 6px ${COLORS.warn}`:"none"}}/>
+      </div>
       <div style={{display:"flex",alignItems:"baseline",gap:6}}>
-        {isBolus?(
-          <>
-            <span style={{fontFamily:"IBM Plex Mono",fontSize:22,fontWeight:700,color:isBolusDone?COLORS.danger:isBolusLow?COLORS.warn:COLORS.text}}>
-              {isBolusDone?"DONE":fmtCountdown(bolusRemaining)}
-            </span>
-            {!isBolusDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted}}>remaining of {fmtTime(line.timeMin)}</span>}
-            {isBolusDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.danger}}>bolus complete</span>}
-            {isBolusLow&&!isBolusDone&&line.timerRunning&&(
-              <span style={{fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.warn,marginLeft:"auto",animation:"pulse 1s ease-in-out infinite"}}>⚠ ending soon</span>
-            )}
-          </>
-        ):(
-          <>
-            <span style={{fontFamily:"IBM Plex Mono",fontSize:22,fontWeight:700,color:COLORS.accent}}>
-              {fmtElapsed(elapsed)}
-            </span>
-            <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted}}>
-              {line.timerRunning?"elapsed":"paused"}
-            </span>
-          </>
-        )}
+        <span style={{fontFamily:"IBM Plex Mono",fontSize:isBolusDone?28:22,fontWeight:700,color:isBolusDone?COLORS.danger:isBolusLow?COLORS.warn:COLORS.text,animation:isBolusDone?"pulse 1s ease-in-out infinite":"none"}}>
+          {isBolusDone?"⚠ BOLUS DONE":fmtCountdown(bolusRemaining)}
+        </span>
+        {!isBolusDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted}}>remaining of {fmtTime(line.timeMin)}</span>}
+        {isBolusDone&&<span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.danger,animation:"pulse 1s ease-in-out infinite"}}>tap Reset when done</span>}
+        {isBolusLow&&!isBolusDone&&line.timerRunning&&<span style={{fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.warn,marginLeft:"auto",animation:"pulse 1s ease-in-out infinite"}}>⚠ ending soon</span>}
       </div>
     </div>
   );
 }
 
 // ─── Line Card ─────────────────────────────────────────────────────────────
+// ─── Dose Calculator ───────────────────────────────────────────────────────
+const DOSE_UNITS = [
+  { value:"mcg/kg/min", label:"mcg/kg/min", weightBased:true,  perMin:true,  factor:0.001 }, // mcg→mg
+  { value:"mg/kg/min",  label:"mg/kg/min",  weightBased:true,  perMin:true,  factor:1     },
+  { value:"mcg/kg/hr",  label:"mcg/kg/hr",  weightBased:true,  perMin:false, factor:0.001 },
+  { value:"mg/kg/hr",   label:"mg/kg/hr",   weightBased:true,  perMin:false, factor:1     },
+  { value:"mcg/min",    label:"mcg/min",    weightBased:false, perMin:true,  factor:0.001 },
+  { value:"mg/min",     label:"mg/min",     weightBased:false, perMin:true,  factor:1     },
+  { value:"mcg/hr",     label:"mcg/hr",     weightBased:false, perMin:false, factor:0.001 },
+  { value:"mg/hr",      label:"mg/hr",      weightBased:false, perMin:false, factor:1     },
+  { value:"units/hr",   label:"units/hr",   weightBased:false, perMin:false, factor:1     },
+  { value:"units/kg/hr",label:"units/kg/hr",weightBased:true,  perMin:false, factor:1     },
+];
+
+const CONC_UNITS = ["mg/mL","mcg/mL","units/mL","g/mL"];
+
+function calcDoseRate({dose, doseUnit, weightKg, concAmt, concUnit}){
+  // Returns mL/hr or null if inputs incomplete
+  if(!dose||!doseUnit||!concAmt||!concUnit)return null;
+  const du = DOSE_UNITS.find(u=>u.value===doseUnit);
+  if(!du)return null;
+  if(du.weightBased && !weightKg)return null;
+
+  // Convert dose to mg/hr
+  let doseMgHr = dose * du.factor; // convert to mg (or units stay as units)
+  if(du.weightBased) doseMgHr *= weightKg;
+  if(du.perMin) doseMgHr *= 60;
+
+  // Convert concentration to mg/mL
+  let concMgMl = concAmt;
+  if(concUnit==="mcg/mL") concMgMl = concAmt / 1000;
+  if(concUnit==="g/mL")   concMgMl = concAmt * 1000;
+  // units/mL — no conversion needed if dose is in units
+
+  if(concMgMl<=0)return null;
+  return doseMgHr / concMgMl; // mL/hr
+}
+
+function DoseCalculator({line, onUpdate, showToast}){
+  const du = DOSE_UNITS.find(u=>u.value===(line.doseUnit||"mcg/kg/min"))||DOSE_UNITS[0];
+  const result = calcDoseRate({
+    dose: parseFloat(line.doseOrdered)||null,
+    doseUnit: line.doseUnit||"mcg/kg/min",
+    weightKg: line.weightLbs
+      ? parseFloat(line.weightLbs)*0.453592
+      : parseFloat(line.weightKg)||null,
+    concAmt: parseFloat(line.concAmt)||null,
+    concUnit: line.concUnit||"mg/mL",
+  });
+
+  const weightKgCalc = line.weightLbs
+    ? (parseFloat(line.weightLbs)*0.453592).toFixed(1)
+    : null;
+
+  function field(label, fieldKey, placeholder, type="number", extra=null){
+    return(
+      <div>
+        <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>{label}</div>
+        <div style={{display:"flex",gap:6}}>
+          <input type={type} value={line[fieldKey]||""} placeholder={placeholder}
+            onChange={e=>onUpdate(line.id,fieldKey,type==="number"?(parseFloat(e.target.value)||""):e.target.value)}
+            style={{flex:1,minWidth:0,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 8px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
+          {extra}
+        </div>
+      </div>
+    );
+  }
+
+  return(
+    <div style={{marginTop:2}}>
+      {/* Row A: Ordered dose + unit */}
+      <div style={{marginBottom:8}}>
+        <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Ordered Dose</div>
+        <div style={{display:"flex",gap:6}}>
+          <input type="number" value={line.doseOrdered||""} placeholder="5"
+            onChange={e=>onUpdate(line.id,"doseOrdered",parseFloat(e.target.value)||"")}
+            style={{flex:1,minWidth:0,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 8px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
+          <select value={line.doseUnit||"mcg/kg/min"}
+            onChange={e=>onUpdate(line.id,"doseUnit",e.target.value)}
+            style={{background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 6px",color:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:11,cursor:"pointer",flexShrink:0}}>
+            {DOSE_UNITS.map(u=><option key={u.value} value={u.value}>{u.label}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {/* Row B: Weight (if weight-based) + Concentration */}
+      <div style={{display:"flex",gap:8,marginBottom:8}}>
+        {du.weightBased&&(
+          <div style={{flex:1}}>
+            <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>
+              Weight
+            </div>
+            <div style={{display:"flex",gap:6}}>
+              <input type="number" value={line.weightKg||""} placeholder="kg"
+                onChange={e=>onUpdate(line.id,"weightKg",parseFloat(e.target.value)||"")}
+                style={{flex:1,minWidth:0,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 6px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
+              <input type="number" value={line.weightLbs||""} placeholder="lbs"
+                onChange={e=>onUpdate(line.id,"weightLbs",parseFloat(e.target.value)||"")}
+                style={{flex:1,minWidth:0,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 6px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
+            </div>
+            {weightKgCalc&&line.weightLbs&&(
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.muted,marginTop:3}}>{weightKgCalc} kg</div>
+            )}
+          </div>
+        )}
+        <div style={{flex:1}}>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Concentration</div>
+          <div style={{display:"flex",gap:6}}>
+            <input type="number" value={line.concAmt||""} placeholder="1.6"
+              onChange={e=>onUpdate(line.id,"concAmt",parseFloat(e.target.value)||"")}
+              style={{flex:1,minWidth:0,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 6px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
+            <select value={line.concUnit||"mg/mL"}
+              onChange={e=>onUpdate(line.id,"concUnit",e.target.value)}
+              style={{background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 4px",color:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:11,cursor:"pointer",flexShrink:0}}>
+              {CONC_UNITS.map(u=><option key={u} value={u}>{u}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* Result */}
+      <div style={{background:result?"rgba(0,212,170,0.08)":COLORS.surface2,border:`1px solid ${result?COLORS.accent:COLORS.border}`,borderRadius:8,padding:"12px 14px",transition:"all 0.3s"}}>
+        {result?(
+          <div>
+            <div style={{display:"flex",alignItems:"baseline",gap:6,marginBottom:4}}>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:28,fontWeight:700,color:COLORS.accent}}>{result.toFixed(1)}</span>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:12,color:COLORS.muted}}>mL/hr</span>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>← set pump to this</span>
+            </div>
+            <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted}}>
+              {line.doseOrdered} {line.doseUnit||"mcg/kg/min"}
+              {du.weightBased&&(line.weightKg||line.weightLbs)?` · ${line.weightKg||(parseFloat(line.weightLbs)*0.453592).toFixed(1)}kg`:""}
+              {" · "}{line.concAmt} {line.concUnit||"mg/mL"}
+            </div>
+            {/* Copy result to rate mode */}
+            <button
+              onClick={()=>{
+                onUpdate(line.id,"volumeMl","");
+                onUpdate(line.id,"timeMin","");
+                showToast(`Rate set to ${result.toFixed(1)} mL/hr`);
+              }}
+              style={{marginTop:8,background:"none",border:`1px solid ${COLORS.accent}`,borderRadius:5,padding:"3px 10px",color:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:10,cursor:"pointer"}}>
+              Use this rate ↓
+            </button>
+          </div>
+        ):(
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:12,color:COLORS.muted}}>
+            {!line.doseOrdered?"Enter ordered dose":""}
+            {line.doseOrdered&&du.weightBased&&!line.weightKg&&!line.weightLbs?"Enter patient weight":""}
+            {line.doseOrdered&&(!du.weightBased||(line.weightKg||line.weightLbs))&&!line.concAmt?"Enter concentration from bag":""}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function LineCard({line,onUpdate,onRemove}){
   const rate=calcMlHr(line.volumeMl,line.timeMin);
   const flagged=rate&&rate>500;
+  const [mode,setMode]=useState(line.mode||"rate"); // "rate" or "dose"
 
   return(
     <div style={{background:COLORS.surface,border:`1px solid ${line.highlight?COLORS.accent:line.isBolus?COLORS.warn:flagged?COLORS.warn:line.timerRunning?COLORS.green:COLORS.border}`,borderRadius:12,padding:16,boxShadow:line.highlight?"0 0 16px rgba(0,212,170,0.13)":line.isBolus?"0 0 10px rgba(245,158,11,0.07)":line.timerRunning?"0 0 12px rgba(34,197,94,0.1)":"none",transition:"border-color 0.4s, box-shadow 0.4s"}}>
@@ -440,6 +738,16 @@ function LineCard({line,onUpdate,onRemove}){
         <div style={{background:`linear-gradient(135deg,${COLORS.accent},${COLORS.blue})`,color:"#0a0f1a",fontFamily:"IBM Plex Mono",fontSize:11,fontWeight:700,padding:"4px 10px",borderRadius:5,whiteSpace:"nowrap"}}>RM {line.room||"?"}</div>
         <div style={{flex:1,fontSize:14,fontWeight:500,color:line.drug?COLORS.text:COLORS.muted}}>{line.drug||"No drug entered"}</div>
         {line.timerRunning&&<span style={{fontFamily:"IBM Plex Mono",fontSize:10,color:COLORS.green,animation:"pulse 2s ease-in-out infinite"}}>● RUNNING</span>}
+
+        {/* Mode toggle: RATE vs DOSE */}
+        <div style={{display:"flex",background:COLORS.surface2,borderRadius:6,padding:2,gap:2}}>
+          {["rate","dose"].map(m=>(
+            <button key={m} onClick={()=>setMode(m)}
+              style={{background:mode===m?COLORS.blue:"none",border:"none",borderRadius:5,padding:"3px 10px",color:mode===m?"#fff":COLORS.muted,fontFamily:"IBM Plex Mono",fontSize:10,fontWeight:600,cursor:"pointer",transition:"all 0.15s",whiteSpace:"nowrap"}}>
+              {m==="rate"?"Rate Calc":"Dose Calc"}
+            </button>
+          ))}
+        </div>
 
         {/* CONT / BOLUS toggle */}
         <button
@@ -465,50 +773,71 @@ function LineCard({line,onUpdate,onRemove}){
         <button onClick={()=>onRemove(line.id)} style={{background:"none",border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"4px 9px",color:COLORS.muted,cursor:"pointer",fontSize:12}}>✕</button>
       </div>
 
+      {/* Mode content */}
+      {mode==="dose"?(
+        <DoseCalculator line={line} onUpdate={onUpdate}/>
+      ):(
+        <>
       {/* Fields */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",gap:8,marginBottom:12}}>
-        {/* Room */}
-        <div>
+      {/* Row 1: Room | Drug | Volume (mL) — all on one line */}
+      <div style={{display:"flex",gap:8,marginBottom:8,alignItems:"flex-end"}}>
+        {/* Room — compact */}
+        <div style={{width:72,flexShrink:0}}>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Room</div>
           <input type="text" value={line.room||""} placeholder="4A"
             onChange={e=>onUpdate(line.id,"room",e.target.value)}
-            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 9px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 8px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
         </div>
-        {/* Drug */}
-        <div>
-          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Drug</div>
-          <input type="text" value={line.drug||""} placeholder="Heparin"
+        {/* Drug — flex fills space */}
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Drug / Fluid</div>
+          <input type="text" value={line.drug||""} placeholder="e.g. Heparin"
             onChange={e=>onUpdate(line.id,"drug",e.target.value)}
-            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 9px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 10px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
         </div>
-        {/* Volume + Unit */}
-        <div>
-          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Amount</div>
-          <div style={{display:"flex",gap:4}}>
-            <input type="number" value={line.volumeMl||""} placeholder="100"
-              onChange={e=>onUpdate(line.id,"volumeMl",parseFloat(e.target.value)||"")}
-              style={{flex:1,minWidth:0,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 6px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
-            <select value={line.unit||"mL"}
-              onChange={e=>onUpdate(line.id,"unit",e.target.value)}
-              style={{background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 4px",color:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:11,cursor:"pointer",flexShrink:0}}>
-              {UNITS.map(u=><option key={u} value={u}>{u}</option>)}
-            </select>
-          </div>
+        {/* Volume — fixed width, always mL */}
+        <div style={{width:90,flexShrink:0}}>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Volume (mL)</div>
+          <input type="number" value={line.volumeMl||""} placeholder="250"
+            onChange={e=>onUpdate(line.id,"volumeMl",parseFloat(e.target.value)||"")}
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 8px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
         </div>
-        {/* Time */}
-        <div>
+      </div>
+
+      {/* Row 2: Time | Concentration */}
+      <div style={{display:"flex",gap:8,marginBottom:8,alignItems:"flex-end"}}>
+        {/* Over (min) */}
+        <div style={{width:100,flexShrink:0}}>
           <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Over (min)</div>
           <input type="number" value={line.timeMin||""} placeholder="60"
             onChange={e=>onUpdate(line.id,"timeMin",parseFloat(e.target.value)||"")}
-            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 9px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 8px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
         </div>
-        {/* Notes */}
-        <div>
-          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Notes</div>
-          <input type="text" value={line.notes||""} placeholder="optional"
-            onChange={e=>onUpdate(line.id,"notes",e.target.value)}
-            style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"7px 9px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:12}}/>
+        {/* Concentration — dose amount + unit dropdown */}
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>
+            Concentration <span style={{color:COLORS.border,letterSpacing:0}}>(optional)</span>
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            <input type="number" value={line.doseAmount||""} placeholder="400"
+              onChange={e=>onUpdate(line.id,"doseAmount",parseFloat(e.target.value)||"")}
+              style={{flex:1,minWidth:0,background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 8px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
+            <select value={line.doseUnit||"mg"}
+              onChange={e=>onUpdate(line.id,"doseUnit",e.target.value)}
+              style={{background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 6px",color:COLORS.accent,fontFamily:"IBM Plex Mono",fontSize:12,cursor:"pointer",flexShrink:0}}>
+              {["mg","mcg","g","units"].map(u=><option key={u} value={u}>{u}</option>)}
+            </select>
+            <span style={{fontFamily:"IBM Plex Mono",fontSize:12,color:COLORS.muted,alignSelf:"center",whiteSpace:"nowrap"}}>/mL</span>
+          </div>
         </div>
+      </div>
+
+      {/* Row 3: Notes full width */}
+      <div style={{marginBottom:12}}>
+        <div style={{fontFamily:"IBM Plex Mono",fontSize:9,letterSpacing:1.5,textTransform:"uppercase",color:COLORS.muted,marginBottom:4}}>Notes</div>
+        <input type="text" value={line.notes||""} placeholder="optional"
+          onChange={e=>onUpdate(line.id,"notes",e.target.value)}
+          style={{width:"100%",background:COLORS.surface2,border:`1px solid ${COLORS.border}`,borderRadius:6,padding:"9px 10px",color:COLORS.text,fontFamily:"IBM Plex Mono",fontSize:13}}/>
       </div>
 
       {/* Result */}
@@ -517,16 +846,18 @@ function LineCard({line,onUpdate,onRemove}){
           {line.isBolus?(
             <>
               <span style={{fontFamily:"IBM Plex Mono",fontSize:24,fontWeight:700,color:COLORS.warn}}>{line.volumeMl||"—"}</span>
-              <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>{line.unit||"mL"} bolus</span>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>mL bolus</span>
               <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginTop:2}}>
-                {rate?`over ${fmtTime(line.timeMin)} (${rate.toFixed(1)} ${line.unit||"mL"}/hr)`:`over ${fmtTime(line.timeMin)}`}
+                {rate?`over ${fmtTime(line.timeMin)} (${rate.toFixed(1)} mL/hr)`:`over ${fmtTime(line.timeMin)}`}
               </div>
+              {line.doseAmount&&<div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.accent,marginTop:2}}>{line.doseAmount}{line.doseUnit}/mL concentration</div>}
             </>
           ):(
             <>
               <span style={{fontFamily:"IBM Plex Mono",fontSize:24,fontWeight:700,color:COLORS.accent}}>{rate?rate.toFixed(1):"—"}</span>
-              <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>{line.unit||"mL"}/hr</span>
-              <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginTop:2}}>{line.volumeMl||"—"}{line.unit||"mL"} over {fmtTime(line.timeMin)}</div>
+              <span style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginLeft:4}}>mL/hr</span>
+              <div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.muted,marginTop:2}}>{line.volumeMl||"—"}mL over {fmtTime(line.timeMin)}</div>
+              {line.doseAmount&&<div style={{fontFamily:"IBM Plex Mono",fontSize:11,color:COLORS.accent,marginTop:2}}>{line.doseAmount}{line.doseUnit}/mL</div>}
             </>
           )}
         </div>
@@ -534,6 +865,8 @@ function LineCard({line,onUpdate,onRemove}){
           {flagged&&!line.isBolus&&<div style={{background:"rgba(245,158,11,0.12)",color:COLORS.warn,border:"1px solid rgba(245,158,11,0.3)",fontFamily:"IBM Plex Mono",fontSize:10,padding:"3px 8px",borderRadius:5}}>⚠ Verify rate</div>}
         </div>
       </div>
+        </>
+      )}
 
       {/* Timer */}
       <LineTimer line={line} onUpdate={onUpdate}/>
@@ -575,8 +908,19 @@ export default function App(){
   function acceptDisclaimer(){try{localStorage.setItem("shiftmate_disclaimer_accepted","true");}catch{}setShowDisclaimer(false);if(window.gtag)window.gtag('event','disclaimer_accepted');}
   function dismissInstall(){try{localStorage.setItem('shiftmate_install_dismissed','true');}catch{}setShowInstall(false);}
 
+  function showToast(msg){showStatus(msg,"success");}
+
   function addLine(data={},source="manual"){
-    setLines(prev=>[...prev,{id:nextId,room:data.room||"",drug:data.drug||"",volumeMl:data.volumeMl||"",timeMin:data.timeMin||"",unit:data.unit||"mL",notes:data.notes||"",highlight:data.highlight||false,timerRunning:false,timerEndsAt:null,isBolus:data.isBolus||false}]);
+    setLines(prev=>[...prev,{
+      id:nextId,room:data.room||"",drug:data.drug||"",
+      volumeMl:data.volumeMl||"",timeMin:data.timeMin||"",
+      doseAmount:data.doseAmount||"",doseUnit:data.doseUnit||"mcg/kg/min",
+      doseOrdered:"",weightKg:"",weightLbs:"",concAmt:"",concUnit:"mg/mL",
+      notes:data.notes||"",highlight:data.highlight||false,
+      timerRunning:false,timerEndsAt:null,
+      isBolus:data.isBolus||false,bagStartedAt:null,
+      mode:"rate",
+    }]);
     setNextId(n=>n+1);
     if(window.gtag)window.gtag('event','line_added',{source});
   }
@@ -617,8 +961,22 @@ export default function App(){
     setLoading(false);
   }
 
-  function onVoiceTranscript(transcript){setInput(transcript);if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});submit(transcript);}
-  function onStopAndParse(){if(input.trim()){if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});submit(input);}}
+  const latestTranscriptRef = useRef("");
+
+  function onVoiceTranscript(transcript){
+    latestTranscriptRef.current = transcript;
+    setInput(transcript);
+    if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});
+    submit(transcript);
+  }
+
+  function onStopAndParse(){
+    const txt = latestTranscriptRef.current || input;
+    if(txt.trim()){
+      if(window.gtag)window.gtag('event','ai_parse',{method:'voice'});
+      submit(txt);
+    }
+  }
 
   return(
     <div style={{background:COLORS.bg,minHeight:"100vh",backgroundImage:"linear-gradient(rgba(0,212,170,0.025) 1px,transparent 1px),linear-gradient(90deg,rgba(0,212,170,0.025) 1px,transparent 1px)",backgroundSize:"32px 32px"}}>
